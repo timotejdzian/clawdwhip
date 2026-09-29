@@ -1295,6 +1295,45 @@ function drawBullets() {
   }
 }
 
+// ── Take his AK: click it while he's Rambo and he calms right down ──────────
+let gunHover = false;
+const TAKE_LINES = ['...fine. you win.', "ok ok. I'm calm.", 'hey! ...actually, thanks.', 'deep breaths.'];
+
+/** Is the cursor on his AK (within a few px of the barrel line)? */
+function overHisGun() {
+  if (!claude.armed || held || claude.ascendAt) return false;
+  const h = claudeHome();
+  const pv = gunPivot(h.x + claude.ox, h.y + claude.oy);
+  const len = C.pixel * AK_SIZE * 13.4;
+  const dx = Math.cos(claude.gunAngle), dy = Math.sin(claude.gunAngle);
+  const along = clamp((mouseX - pv.x) * dx + (mouseY - pv.y) * dy, -len * 0.7, len);
+  return Math.hypot(pv.x + dx * along - mouseX, pv.y + dy * along - mouseY) < 16;
+}
+
+/** Catch clicks only while hovering the gun; everywhere else they go to Claude. */
+function updateGunHover() {
+  const over = overHisGun();
+  if (over === gunHover) return;
+  gunHover = over;
+  canvas.style.cursor = over ? 'grab' : '';
+  if (!rackHover && !held) window.bridge.setClickThrough(!over);
+}
+
+function takeHisGun() {
+  Object.assign(claude, { armed: false, rage: 0, maxHits: 0, godHits: 0, happy: 1, hurt: 0 });
+  bullets.length = 0;
+  const h = claudeHome();
+  for (let i = 0; i < 6; i++) {
+    particles.push({ kind: 'heart', x: h.x + claude.ox + (Math.random() - 0.5) * CW, y: h.y + claude.oy - CH / 2,
+                     vx: (Math.random() - 0.5) * 1.5, vy: -1.5 - Math.random(), life: 1 });
+  }
+  say(pick(TAKE_LINES), 2000);
+  save();
+  updateGunHover(); // no gun left to hover: hand clicks back to Claude
+}
+
+canvas.addEventListener('pointerdown', e => { if (e.button === 0 && overHisGun()) takeHisGun(); });
+
 function resetClaude() {
   hits = 0;
   tipped = 0;
@@ -1803,8 +1842,12 @@ function closeAll() {
 }
 
 document.addEventListener('pointermove', e => { mouseX = e.clientX; mouseY = e.clientY; });
-toolsEl.addEventListener('mouseenter', () => window.bridge.setClickThrough(false));
-toolsEl.addEventListener('mouseleave', () => { if (!held) window.bridge.setClickThrough(true); });
+let rackHover = false;
+toolsEl.addEventListener('mouseenter', () => { rackHover = true; window.bridge.setClickThrough(false); });
+toolsEl.addEventListener('mouseleave', () => {
+  rackHover = false;
+  if (!held && !gunHover) window.bridge.setClickThrough(true);
+});
 toolsEl.querySelectorAll('[data-tool]').forEach(b => {
   b.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
@@ -1829,6 +1872,7 @@ function loop() {
   updateClaude();
   draw();
   if (toolsEl.classList.contains('open')) placeToolbar(); // follows the window if moved
+  updateGunHover();
   if (closeAt && Date.now() > closeAt) {
     closeAt = 0;
     bills.length = 0;

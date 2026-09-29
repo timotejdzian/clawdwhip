@@ -37,7 +37,8 @@ OpenWhip's Electron and koffi.)
 - **His AK-47:** whip him 10 more times once he's UNHINGED and he goes Rambo (headband,
   ammo belt, camo). While you carry the whip he fires bursts at your hand; a hit knocks
   the whip back to the rack, a miss leaves a bullet hole. Keep moving. Calm him below
-  UNHINGED and he puts it away.
+  UNHINGED and he puts it away, or **click his AK** to take it off him and he calms
+  right down.
 - **Ascension:** whip Rambo 5 more times and he becomes a god: white-gold, halo, a pillar
   of light, and he rises off the screen. On the way out he **closes the Claude app** (a
   normal close request, like clicking its ✕), then comes back calm next time.
