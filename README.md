@@ -40,10 +40,11 @@ OpenWhip's Electron and koffi.)
   the whip back to the rack, a miss leaves a bullet hole. Keep moving. Calm him below
   UNHINGED and he puts it away, or **grab his AK** (press on it) and fling it away: it
   flies off the way you throw it.
-- **His inventory:** with the AK gone he throws everything he's got at your cursor: cakes
-  and tennis rackets. A cake that hits splats on your screen, a racket bonks off, and
-  either knocks whatever you're holding back to the rack. Once he's out: "oh... I am
-  empty." and he calms right down.
+- **His inventory:** with the AK gone he throws a random handful (5-8) of junk at your
+  cursor: cakes, tennis rackets, rubber ducks, bananas, coffee mugs, keyboards, fish and
+  pizza. A cake that hits splats on your screen, anything else bonks off, and either
+  knocks whatever you're holding back to the rack. Once he's out: "oh... I am empty."
+  and he calms right down.
 - **Ascension:** whip Rambo 5 more times and he becomes a god: white-gold, halo, a pillar
   of light, and he rises off the screen. On the way out he **closes the Claude app** (a
   normal close request, like clicking its ✕), then comes back calm next time.
@@ -66,7 +67,8 @@ Everything is at the top of its section in `overlay.html`:
 - `MONEY`: calming per bill, spray rate, speed, spread.
 - `ROYALTY`: bills per king stage, cost of a whip, his lines.
 - `ARM_AFTER`, `AK_SIZE`, `GUNFIGHT`: when he pulls the AK, its size, fire rate, aim.
-- `INVENTORY`, `THROW`: what he throws once you take the AK, and how fast and often.
+- `THROW`, `THROW_LINES`: how many things he throws once you take the AK, how fast and
+  often, and what they are (each item also needs a `DRAW_ITEM` entry).
 - `ASCEND_AFTER`, `ASCEND_MS`: whips as Rambo before he ascends, and how long it takes.
 
 `node tools/make-icon.js` regenerates the tray icon from the pixel art.

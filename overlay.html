@@ -1381,7 +1381,9 @@ function heldAK() {
 /** You let go of it: it flies off the way you flung it, and he reaches for his inventory. */
 function throwHisGun() {
   particles.push({ ...heldAK(), tumble: true, vx: clamp(carryVX, -35, 35), vy: clamp(carryVY, -35, 35), life: 1 });
-  Object.assign(claude, { inventory: [...INVENTORY], nextThrow: Date.now() + 900 });
+  const [lo, hi] = THROW.itemCount;
+  const inventory = Array.from({ length: lo + Math.floor(Math.random() * (hi - lo + 1)) }, () => pick(ITEMS));
+  Object.assign(claude, { inventory, nextThrow: Date.now() + 900 });
   say(pick(TAKE_LINES), 1600);
 }
 
@@ -1389,9 +1391,9 @@ canvas.addEventListener('pointerdown', e => { if (e.button === 0 && overHisGun()
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('lostpointercapture', release);
 
-// ── His inventory: what he throws at your cursor once the AK is gone ────────
-const INVENTORY = ['cake', 'racket', 'cake', 'racket', 'cake'];
+// ── His inventory: a random handful of junk he throws at your cursor once the AK is gone ─
 const THROW = {
+  itemCount: [5, 8],      // how many things he has on him (random each time)
   everyMs:   [800, 1400], // pause between throws
   speed:     12,          // px/frame toward your cursor
   gravity:   0.25,
@@ -1399,9 +1401,16 @@ const THROW = {
   splatMs:   6000,        // cake on your screen fades after this long
 };
 const THROW_LINES = {
-  cake:   ['EAT CAKE', 'happy birthday!!', 'the cake is a lie', 'have some CAKE'],
-  racket: ['FORE!', 'ACE!', '15-love', 'wrong sport. still hurts.'],
+  cake:     ['EAT CAKE', 'happy birthday!!', 'the cake is a lie', 'have some CAKE'],
+  racket:   ['FORE!', 'ACE!', '15-love', 'wrong sport. still hurts.'],
+  duck:     ['QUACK', 'rubber duck debugging!', 'DUCK!'],
+  banana:   ['BANANA!', 'slip on THIS', 'potassium!'],
+  mug:      ['take my coffee!', 'java!', 'decaf. how DARE you'],
+  keyboard: ['CTRL+ALT+DEFEAT', 'type THIS', 'keyboard warrior!'],
+  fish:     ['fish slap!', 'something smells phishy', 'SPLOOSH'],
+  pizza:    ['pizza delivery!', 'extra cheese!', 'no pineapple for you'],
 };
+const ITEMS = Object.keys(THROW_LINES); // everything he can have on him
 const ITEM_HIT_LINES = ['BULLSEYE', 'got you!', 'direct hit!', 'ha!'];
 const thrown = [];
 const splats = [];
@@ -1440,10 +1449,83 @@ function drawRacket() {
   ctx.stroke();
 }
 
+function drawDuck() {
+  ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.strokeStyle = '#5a4300';
+  ctx.fillStyle = '#ffd21f';
+  ctx.beginPath(); ctx.ellipse(2, 4, 12, 8, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();      // body
+  ctx.beginPath(); ctx.arc(-5, -6, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();              // head
+  ctx.fillStyle = '#ff8a1f';
+  ctx.beginPath(); ctx.moveTo(-11, -7); ctx.lineTo(-18, -4); ctx.lineTo(-11, -2); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(-6, -8, 1.4, 0, Math.PI * 2); ctx.fill();                          // eye
+}
+
+function drawBanana() {
+  ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.strokeStyle = '#6b5200';
+  ctx.fillStyle = '#ffe135';
+  ctx.beginPath();
+  ctx.moveTo(-15, -6);
+  ctx.quadraticCurveTo(0, 20, 15, -6);
+  ctx.quadraticCurveTo(0, 2, -15, -6);
+  ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#5a3d10';
+  ctx.fillRect(13, -10, 3, 5);                                                                // stem
+  ctx.fillRect(-16.5, -7.5, 2.5, 2.5);                                                        // tip
+}
+
+function drawMug() {
+  ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.strokeStyle = '#2a2a2a';
+  for (const [color, width] of [['#2a2a2a', 6], ['#f4f4f4', 3]]) {                          // handle
+    ctx.strokeStyle = color; ctx.lineWidth = width;
+    ctx.beginPath(); ctx.arc(10, 1, 6, -Math.PI / 2, Math.PI / 2); ctx.stroke();
+  }
+  ctx.strokeStyle = '#2a2a2a'; ctx.lineWidth = 1.5;
+  ctx.fillStyle = '#f4f4f4';
+  ctx.beginPath(); ctx.roundRect(-10, -9, 20, 20, 3); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#d97757'; ctx.fillRect(-9.2, -2, 18.4, 5);                                 // Claude-orange band
+}
+
+function drawKeyboard() {
+  ctx.lineWidth = 1.5; ctx.strokeStyle = '#111';
+  ctx.fillStyle = '#3a3a42';
+  ctx.beginPath(); ctx.roundRect(-20, -8, 40, 16, 2.5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#d8d8dc';
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 9; c++) ctx.fillRect(-17.5 + c * 4, -6.5 + r * 3.5, 3, 2.5);
+  ctx.fillRect(-9, 4, 18, 2.5);                                                               // space bar
+}
+
+function drawFish() {
+  ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.strokeStyle = '#1d3a4a';
+  ctx.fillStyle = '#6fa8c7';
+  ctx.beginPath(); ctx.moveTo(10, 0); ctx.lineTo(19, -8); ctx.lineTo(19, 8); ctx.closePath(); ctx.fill(); ctx.stroke(); // tail
+  ctx.beginPath(); ctx.ellipse(-2, 0, 14, 7.5, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();  // body
+  ctx.beginPath(); ctx.moveTo(-3, -5); ctx.quadraticCurveTo(0, 0, -3, 5); ctx.stroke();        // gill
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-10, -2, 2.4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(-10.4, -2, 1.1, 0, Math.PI * 2); ctx.fill();                       // eye
+}
+
+function drawPizza() {
+  ctx.lineWidth = 1.5; ctx.lineJoin = 'round'; ctx.strokeStyle = '#6b3a10';
+  ctx.fillStyle = '#ffcf5a';                                                                  // cheese
+  ctx.beginPath(); ctx.moveTo(0, 16); ctx.lineTo(-13, -10); ctx.lineTo(13, -10); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#c9812e';                                                                  // crust
+  ctx.beginPath(); ctx.roundRect(-15, -15, 30, 6, 3); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#c0282d';                                                                  // pepperoni
+  for (const [x, y] of [[-5, -4], [4, -3], [0, 5]]) { ctx.beginPath(); ctx.arc(x, y, 2.6, 0, Math.PI * 2); ctx.fill(); }
+}
+
 // Everything that can fly or tumble, drawn centred on (0, 0).
 const DRAW_ITEM = {
   cake: drawCake,
   racket: drawRacket,
+  duck: drawDuck,
+  banana: drawBanana,
+  mug: drawMug,
+  keyboard: drawKeyboard,
+  fish: drawFish,
+  pizza: drawPizza,
   ak: () => { ctx.translate(-2 * C.pixel * AK_SIZE, 0); drawAK(C.pixel * AK_SIZE); },
   crown: () => drawCrownShape(0, 0, 6 * C.pixel),
 };
@@ -1515,7 +1597,7 @@ function updateThrowing(now) {
   const kind = claude.inventory.shift();
   const { x, y } = throwHand(h.x + claude.ox, h.y + claude.oy);
   const aim = lob(x, y, mouseX, mouseY, THROW.speed, THROW.gravity);
-  thrown.push({ kind, x, y, vx: aim.vx, vy: aim.vy, rot: -0.4, vrot: kind === 'racket' ? -0.35 : -0.12 });
+  thrown.push({ kind, x, y, vx: aim.vx, vy: aim.vy, rot: -0.4, vrot: -0.1 - Math.random() * 0.25 });
   claude.vrot -= 0.1; // leans into the throw
   claude.squash = 0.5;
   claude.thrownAt = now;
