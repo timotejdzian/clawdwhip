@@ -33,7 +33,8 @@ OpenWhip's Electron and koffi.)
 
 - **Whip** (outer half of the whip, swung fast): he reacts and gets angrier: calm →
   annoyed → irritated → angry → furious → UNHINGED. Anger cools one whip's worth every
-  20 s, even while the app is closed.
+  20 s, even while the app is closed. He sometimes ducks or sidesteps a swing (15% when
+  calm, up to 45% when UNHINGED), but never twice in a row.
 - **His AK-47:** whip him 10 more times once he's UNHINGED and he goes Rambo (headband,
   ammo belt, camo). While you carry the whip he fires bursts at your hand; a hit knocks
   the whip back to the rack, a miss leaves a bullet hole. Keep moving. Calm him below
@@ -56,6 +57,7 @@ Everything is at the top of its section in `overlay.html`:
 
 - `P`: whip physics (from OpenWhip).
 - `C`: Claude's size, position, hit sensitivity, knockback.
+- `DODGE`: his dodge chance per anger level, how long a dodge lasts, the cooldown.
 - `ANGER`: anger per whip, cool-down, and each level's look and lines.
 - `MONEY`: calming per bill, spray rate, speed, spread.
 - `ROYALTY`: bills per king stage, cost of a whip, his lines.
