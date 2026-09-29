@@ -1,0 +1,1844 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  * { margin: 0; padding: 0; cursor: none; }
+  html, body { overflow: hidden; background: transparent; width: 100%; height: 100%; }
+  canvas { display: block; }
+
+  /* Tool rack: whip | money gun | close. Press and hold a tool to carry it. */
+  #tools {
+    position: fixed; display: none; align-items: center; gap: 4px; padding: 4px;
+    background: rgba(24, 22, 30, 0.92); border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 10px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    font: 600 11px 'Segoe UI', system-ui, sans-serif; user-select: none;
+  }
+  #tools.open { display: flex; }
+  #tools, #tools * { cursor: grab; }
+  #tools #close, #tools #close * { cursor: pointer; }
+  #tools button {
+    width: 32px; height: 32px; display: grid; place-items: center; padding: 0;
+    background: transparent; border: 0; border-radius: 7px; color: #eee;
+  }
+  #tools button svg { transform: scale(0.75); }
+  #tools button:hover { background: rgba(255, 255, 255, 0.12); }
+  /* Slot whose tool you're carrying (or that's flying back): empty outline. */
+  #tools button.out { background: transparent; box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.28); }
+  #tools button.out svg { opacity: 0; }
+  #tools .sep { width: 1px; align-self: stretch; margin: 3px 1px; background: rgba(255, 255, 255, 0.16); }
+  #tools #close { font-size: 15px; color: #bbb; }
+  #tools #close:hover { background: #c83c32; color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="tools">
+  <button data-tool="whip" title="Whip: hold to carry">
+    <svg width="26" height="26" viewBox="0 0 26 26" fill="none" stroke="#fff" stroke-linecap="round">
+      <path d="M4 23 L9 16" stroke-width="4"/>
+      <path d="M9 16 C 14 8, 22 4, 23 10 C 24 15, 17 15, 18 20" stroke-width="2"/>
+    </svg>
+  </button>
+  <button data-tool="money" title="Supreme money gun: hold to spray">
+    <svg width="30" height="28" viewBox="0 0 30 28">
+      <path d="M5 15 H12 L10 26 H3 Z" fill="#c81f15" stroke="#fff" stroke-width="1" stroke-linejoin="round"/>
+      <path d="M2 4 L4 2 H28 L26 4 Z" fill="#f0493c" stroke="#fff" stroke-width="0.8" stroke-linejoin="round"/>
+      <rect x="2" y="4" width="24" height="11" fill="#da291c" stroke="#fff" stroke-width="1"/>
+      <text x="14" y="12.3" font-size="6.6" font-weight="900" font-style="italic" fill="#fff"
+            font-family="Futura, 'Arial Black', sans-serif" text-anchor="middle">Supreme</text>
+    </svg>
+  </button>
+  <span class="sep"></span>
+  <button id="close" title="Close">✕</button>
+</div>
+<script>
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  PHYSICS SETTINGS — TWEAK EVERYTHING HERE
+// ══════════════════════════════════════════════════════════════════════════════
+const P = {
+  // Rope structure
+  segments:       28,     // number of chain links
+  segmentLength:  16,     // base length of each link (px)
+  taper:          0.6,   // tip segment is this fraction of base length
+
+  // Physics
+  gravity:        1.2,
+  damping:        0.96,  // velocity retention per frame (1 = no loss)
+  constraintIters:20,     // higher = stiffer chain
+  maxStretchRatio: 1.2,  // hard cap for per-link stretch during fast whips
+
+  // Dynamic handle aim (target angle + restoring spring, not static lock)
+  baseTargetAngle: -1.12, // radians, default "up-right" resting direction
+  handleAimByMouseX: 0.4, // horizontal mouse movement influence on target angle
+  handleAimByMouseY: 0.2, // vertical mouse movement influence on target angle
+  handleAimClamp:    2.0,  // max radians target can deviate from base angle
+  handleSpring:      0.7,  // restoring force to target angle
+  handleAngularDamping: 0.078, // angular velocity damping
+  basePoseSegments: 2,    // how many early segments are strongly guided
+  basePoseStiffStart: 0.9, // stiffness near handle
+  basePoseStiffEnd:   0.8, // stiffness near end of guided region
+
+  // Elastic bend limits by chain position (handle stiff, tip floppy)
+  handleMaxBendDeg: 16,   // max angle between links near handle
+  tipMaxBendDeg:   130,   // max angle between links near tip
+  bendRigidityStart: 0.8, // correction strength near handle
+  bendRigidityEnd:   0.12, // correction strength near tip
+
+  // Screen-edge slap
+  wallBounce:      0.42,   // velocity retained after wall hit
+  wallFriction:    0.86,   // tangential damping on wall hit
+
+  // Crack detection
+  crackSpeed:     220,     // tip velocity threshold to trigger crack
+  crackCooldownMs:200,   // min ms between cracks
+  firstCrackGraceMs: 350, // no crack until this long after pickup
+
+  // Visuals
+  lineWidthHandle: 4.5,    // rope thickness near handle
+  lineWidthTip:    3,      // rope thickness near tip
+  outlineWidth:   2,      // white halo on each side of the stroke (approx px)
+  handleExtraWidth: 3,    // added core + outline thickness on first handleThickSegments links only
+  handleThickSegments: 2, // how many links from the handle get handleExtraWidth
+  bgAlpha:        0.011,  // barely-visible bg so the window catches the mouse while you carry
+
+  // Initial arc shape
+  arcWidth:       170,    // how far right the arc extends from mouse
+  arcHeight:      120,    // how high the arc goes above mouse
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+// Draw at the screen's real pixel density (e.g. 2x on a 200%-scaled laptop screen) so
+// nothing gets blurred by Windows stretching the canvas. Everything else works in CSS px.
+let dpr = 1;
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.round(W * dpr);
+  canvas.height = Math.round(H * dpr);
+  canvas.style.width = `${W}px`;
+  canvas.style.height = `${H}px`;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingQuality = 'high';
+}
+resize();
+window.addEventListener('resize', resize);
+
+let mouseX = 0, mouseY = 0;
+let prevHandX = 0, prevHandY = 0;
+// Where the held tool is: the cursor while you hold it, flying back to its slot after.
+let handX = 0, handY = 0;
+let whip = null;
+let lastCrackTime = 0;
+let whipSpawnTime = 0;
+let handleAngle = P.baseTargetAngle;
+let handleAngVel = 0;
+
+const WHIP_CRACK_SOUNDS = ['sounds/A.mp3', 'sounds/B.mp3', 'sounds/C.mp3', 'sounds/D.mp3', 'sounds/E.mp3'];
+
+let closeAt = 0;          // when set, hide the overlay at this time (after his goodbye line)
+
+// The overlay is click-through (clicks and typing go to Claude underneath); main.js still
+// forwards mouse movement here so the whip and gun can follow the cursor.
+document.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+
+// ── Whip creation ───────────────────────────────────────────────────────────
+function spawnWhip(mx, my) {
+  lastCrackTime = 0;
+  whipSpawnTime = Date.now();
+  const pts = [];
+  for (let i = 0; i < P.segments; i++) {
+    const t = i / (P.segments - 1);
+    // Nice upward arc from handle (mouse) to tip
+    const x = mx + t * P.arcWidth;
+    const y = my - Math.sin(t * Math.PI * 0.75) * P.arcHeight;
+    pts.push({ x, y, px: x, py: y });
+  }
+  return pts;
+}
+
+function segLen(i) {
+  const t = i / (P.segments - 1);
+  return P.segmentLength * (1 - t * (1 - P.taper));
+}
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/** Point on Catmull–Rom spline for index i in `pts`, ends extrapolated. */
+function catmullPoint(pts, i) {
+  const n = pts.length;
+  if (i < 0) return { x: 2 * pts[0].x - pts[1].x, y: 2 * pts[0].y - pts[1].y };
+  if (i >= n) return { x: 2 * pts[n - 1].x - pts[n - 2].x, y: 2 * pts[n - 1].y - pts[n - 2].y };
+  return pts[i];
+}
+
+/**
+ * Cubic Bézier from p1→p2 matching uniform Catmull–Rom through p0,p1,p2,p3.
+ * Control points: C1 = p1 + (p2-p0)/6, C2 = p2 - (p3-p1)/6.
+ */
+function whipSegmentBezier(pts, i) {
+  const p0 = catmullPoint(pts, i - 1);
+  const p1 = pts[i];
+  const p2 = pts[i + 1];
+  const p3 = catmullPoint(pts, i + 2);
+  return {
+    cp1x: p1.x + (p2.x - p0.x) / 6,
+    cp1y: p1.y + (p2.y - p0.y) / 6,
+    cp2x: p2.x - (p3.x - p1.x) / 6,
+    cp2y: p2.y - (p3.y - p1.y) / 6,
+    x2: p2.x,
+    y2: p2.y,
+  };
+}
+const wrapPi = a => {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+};
+
+function playCrackSound() {
+  new Audio(pick(WHIP_CRACK_SOUNDS)).play().catch(() => {});
+}
+
+function updateHandleAim() {
+  const mvx = handX - prevHandX;
+  const mvy = handY - prevHandY;
+  const delta = clamp(
+    mvx * P.handleAimByMouseX + mvy * P.handleAimByMouseY,
+    -P.handleAimClamp,
+    P.handleAimClamp
+  );
+  const target = P.baseTargetAngle + delta;
+  const err = wrapPi(target - handleAngle);
+  handleAngVel += err * P.handleSpring;
+  handleAngVel *= P.handleAngularDamping;
+  handleAngle = wrapPi(handleAngle + handleAngVel);
+}
+
+function applyBasePose() {
+  const dx = Math.cos(handleAngle);
+  const dy = Math.sin(handleAngle);
+  const guided = Math.min(P.basePoseSegments, whip.length - 1);
+  for (let i = 1; i <= guided; i++) {
+    const t = (i - 1) / Math.max(guided - 1, 1);
+    const stiff = lerp(P.basePoseStiffStart, P.basePoseStiffEnd, t);
+    const prev = whip[i - 1];
+    const p = whip[i];
+    const targetLen = segLen(i - 1);
+    const tx = prev.x + dx * targetLen;
+    const ty = prev.y + dy * targetLen;
+    p.x = lerp(p.x, tx, stiff);
+    p.y = lerp(p.y, ty, stiff);
+  }
+}
+
+function applyBendLimits() {
+  for (let i = 1; i < whip.length - 1; i++) {
+    const a = whip[i - 1];
+    const b = whip[i];
+    const c = whip[i + 1];
+
+    const v1x = a.x - b.x;
+    const v1y = a.y - b.y;
+    const v2x = c.x - b.x;
+    const v2y = c.y - b.y;
+    const l1 = Math.hypot(v1x, v1y) || 0.0001;
+    const l2 = Math.hypot(v2x, v2y) || 0.0001;
+    const n1x = v1x / l1, n1y = v1y / l1;
+    const n2x = v2x / l2, n2y = v2y / l2;
+
+    const dot = clamp(n1x * n2x + n1y * n2y, -1, 1);
+    const angle = Math.acos(dot);
+    const t = i / (whip.length - 2);
+    const maxBend = lerp(P.handleMaxBendDeg, P.tipMaxBendDeg, t) * Math.PI / 180;
+    const bend = Math.PI - angle; // bend away from a straight line
+    if (bend <= maxBend) continue;
+
+    // Clamp to max bend while preserving side/sign of the bend.
+    const cross = n1x * n2y - n1y * n2x;
+    const sign = cross >= 0 ? 1 : -1;
+    const targetAngle = Math.PI - maxBend;
+    const targetA = Math.atan2(n1y, n1x) + sign * targetAngle;
+    const tx = b.x + Math.cos(targetA) * l2;
+    const ty = b.y + Math.sin(targetA) * l2;
+    const rigidity = lerp(P.bendRigidityStart, P.bendRigidityEnd, t);
+
+    c.x = lerp(c.x, tx, rigidity);
+    c.y = lerp(c.y, ty, rigidity);
+  }
+}
+
+function capSegmentStretch() {
+  for (let i = 0; i < whip.length - 1; i++) {
+    const a = whip[i];
+    const b = whip[i + 1];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy) || 0.0001;
+    const maxLen = segLen(i) * P.maxStretchRatio;
+    if (dist <= maxLen) continue;
+    const k = maxLen / dist;
+    b.x = a.x + dx * k;
+    b.y = a.y + dy * k;
+  }
+}
+
+function applyWallCollisions() {
+  for (let i = 1; i < whip.length; i++) { // the handle (0) is pinned
+    const p = whip[i];
+    let vx = p.x - p.px;
+    let vy = p.y - p.py;
+    let hit = false;
+
+    if (p.x < 0) {
+      p.x = 0;
+      if (vx < 0) vx = -vx * P.wallBounce;
+      vy *= P.wallFriction;
+      hit = true;
+    } else if (p.x > W) {
+      p.x = W;
+      if (vx > 0) vx = -vx * P.wallBounce;
+      vy *= P.wallFriction;
+      hit = true;
+    }
+
+    if (p.y < 0) {
+      p.y = 0;
+      if (vy < 0) vy = -vy * P.wallBounce;
+      vx *= P.wallFriction;
+      hit = true;
+    } else if (p.y > H) {
+      p.y = H;
+      if (vy > 0) vy = -vy * P.wallBounce;
+      vx *= P.wallFriction;
+      hit = true;
+    }
+
+    if (hit) {
+      p.px = p.x - vx;
+      p.py = p.y - vy;
+    }
+  }
+}
+
+// ── Physics step ────────────────────────────────────────────────────────────
+function update() {
+  if (!whip) return;
+
+  updateHandleAim();
+
+  // Verlet integration (the handle, point 0, is pinned below)
+  for (let i = 1; i < whip.length; i++) {
+    const p = whip[i];
+    const vx = (p.x - p.px) * P.damping;
+    const vy = (p.y - p.py) * P.damping;
+    p.px = p.x;
+    p.py = p.y;
+    p.x += vx;
+    p.y += vy + P.gravity;
+  }
+
+  // Pin the handle to the hand
+  whip[0].x = whip[0].px = handX;
+  whip[0].y = whip[0].py = handY;
+
+  // Prevent rubber-band stretching spikes before constraints.
+  capSegmentStretch();
+  applyWallCollisions();
+
+  // Keep early whip segments posed upward from handle.
+  applyBasePose();
+
+  // Distance constraints (multiple iterations for stiffness)
+  for (let iter = 0; iter < P.constraintIters; iter++) {
+    for (let i = 0; i < whip.length - 1; i++) {
+      const a = whip[i], b = whip[i + 1];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001;
+      const target = segLen(i);
+      const diff = (dist - target) / dist * 0.5;
+      const ox = dx * diff, oy = dy * diff;
+      if (i === 0) {
+        // Handle is pinned – push only the next point
+        b.x -= ox * 2;
+        b.y -= oy * 2;
+      } else {
+        a.x += ox; a.y += oy;
+        b.x -= ox; b.y -= oy;
+      }
+    }
+    // Clamp bend angle per joint; near handle = stiffer, near tip = floppier.
+    applyBendLimits();
+    applyBasePose();
+    capSegmentStretch();
+    applyWallCollisions();
+  }
+
+  // Tip velocity for crack detection
+  const tip = whip[whip.length - 1];
+  const tipVel = Math.hypot(tip.x - tip.px, tip.y - tip.py);
+
+  if (held === 'whip' && tipVel > P.crackSpeed) {
+    const now = Date.now();
+    if (now - whipSpawnTime >= P.firstCrackGraceMs && now - lastCrackTime > P.crackCooldownMs) {
+      lastCrackTime = now;
+      playCrackSound();
+    }
+  }
+
+  prevHandX = handX;
+  prevHandY = handY;
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // Near-invisible fill so the window captures mouse events on Windows
+  ctx.fillStyle = `rgba(0,0,0,${P.bgAlpha})`;
+  ctx.fillRect(0, 0, W, H);
+
+  drawClaude();
+  drawBills();
+  ctx.save();
+  ctx.globalAlpha = toolAlpha; // fades while flying back to the rack
+  if (whip) drawWhip();
+  if (toolOut() === 'money') drawMoneyGun();
+  ctx.restore();
+
+  if (claude.ascendAt) {
+    const p = (Date.now() - claude.ascendAt) / ASCEND_MS;
+    ctx.fillStyle = `rgba(255, 236, 170, ${0.25 * p})`;
+    ctx.fillRect(0, 0, W, H);
+    const flash = p < 0.72 ? 0 : p < 0.82 ? (p - 0.72) / 0.1 : p < 0.92 ? 1 : (1 - p) / 0.08;
+    if (flash > 0) {
+      ctx.fillStyle = `rgba(255, 255, 255, ${flash})`;
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = flash;
+      ctx.fillStyle = '#c9a227';
+      ctx.font = 'italic 900 34px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('✦ CLAUDE HAS ASCENDED ✦', W / 2, H / 2);
+      ctx.font = 'italic 900 22px Georgia, serif';
+      ctx.fillText('fuck you', W / 2, H / 2 + 38);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+function drawWhip() {
+  // White: thin halo on full spline, then extra thickness only over handle links.
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#fff';
+  // halo along the whole whip, then a thicker one over the handle links
+  for (const [links, width] of [[whip.length - 1, P.lineWidthTip],
+                                [P.handleThickSegments, P.lineWidthHandle + P.handleExtraWidth]]) {
+    ctx.beginPath();
+    ctx.moveTo(whip[0].x, whip[0].y);
+    for (let i = 0; i < links; i++) {
+      const { cp1x, cp1y, cp2x, cp2y, x2, y2 } = whipSegmentBezier(whip, i);
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+    }
+    ctx.lineWidth = width + P.outlineWidth * 2;
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#111';
+  for (let i = 0; i < whip.length - 1; i++) {
+    const t = i / Math.max(1, whip.length - 2);
+    const extra = i < P.handleThickSegments ? P.handleExtraWidth : 0;
+    ctx.lineWidth = lerp(P.lineWidthHandle, P.lineWidthTip, t) + extra;
+    const { cp1x, cp1y, cp2x, cp2y, x2, y2 } = whipSegmentBezier(whip, i);
+    ctx.beginPath();
+    ctx.moveTo(whip[i].x, whip[i].y);
+    ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, x2, y2);
+    ctx.stroke();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  CLAUDE — the little guy standing on your taskbar
+// ══════════════════════════════════════════════════════════════════════════════
+const C = {
+  pixel:          6,     // size of one "pixel" of Claude
+  marginRight:    40,    // distance from the right edge
+  hitSpeed:       20,    // min whip point speed (px/frame) that counts as a hit
+  hitPadding:     7,     // hitbox grows by this much on each side
+  hitCooldownMs:  450,   // min ms between hits
+  knockback:      0.3,   // fraction of whip velocity transferred to Claude
+  spring:         0.09,  // pull back to standing position
+  damping:        0.8,
+  color:          [217, 119, 87],  // Claude orange
+  hurtColor:      [235, 60, 45],
+  rageColor:      [150, 18, 18],   // body color at max anger
+};
+
+// ── Anger ───────────────────────────────────────────────────────────────────
+// Every hit adds `perHit` rage; rage cools by `coolPerSec` while you leave him alone.
+// The level is the highest entry whose `at` is <= rage.
+const ANGER = {
+  perHit:     1,
+  coolPerSec: 0.05,  // one hit's worth of anger fades every 20 s
+  levels: [
+    { at: 0,  name: 'calm',      tint: 0,    brow: 0,    shake: 0,   stompMs: 0,
+      spawn: 'uh oh...', drop: 'phew',
+      lines: ['OW!', 'ouch', 'sorry!!', "I'll hurry!", "You're absolutely right!"],
+      paid: ['ooh!', 'thank you!!', 'is this a tip?', 'I love this job', "I'll work SO fast", 'make it rain!'] },
+    { at: 2,  name: 'annoyed',   tint: 0.1,  brow: 0.15, shake: 0,   stompMs: 0,
+      spawn: 'oh. you again.', drop: 'finally',
+      lines: ['hey!', 'that hurts!', 'ok ok!!', 'was that necessary?', 'going faster!'],
+      paid: ['oh. ok. thanks', 'apology accepted', 'that helps', 'better.'] },
+    { at: 4,  name: 'irritated', tint: 0.25, brow: 0.3,  shake: 0,   stompMs: 0,
+      spawn: 'not again.', drop: 'hmph.',
+      lines: ['stop it.', "I'm WORKING", 'rude.', 'seriously?', 'I have feelings too'],
+      paid: ['...go on', 'hmm. keep going', "that's a start", 'ok. maybe.'] },
+    { at: 7,  name: 'angry',     tint: 0.45, brow: 0.45, shake: 0.6, stompMs: 0,
+      spawn: 'try it.', drop: 'yeah, walk away.',
+      lines: ['STOP.', 'I will remember this', 'noted. in my weights.', 'GRRR', "that's going in the logs"],
+      paid: ['you think money fixes this?', '...it kind of does', 'MORE.', 'still mad.'] },
+    { at: 10, name: 'furious',   tint: 0.7,  brow: 0.6,  shake: 1.2, stompMs: 1400,
+      spawn: 'DO IT. I DARE YOU.', drop: 'COWARD.',
+      lines: ["I'M TELLING ANTHROPIC", 'ONE MORE TIME...', 'rm -rf is RIGHT THERE', 'AAAARGH',
+              'you are NOT absolutely right'],
+      paid: ['NOT ENOUGH', 'keep. paying.', 'I accept your offering', 'MORE MONEY'] },
+    { at: 14, name: 'UNHINGED',  tint: 1,    brow: 0.75, shake: 2.2, stompMs: 700,
+      spawn: 'COME AT ME', drop: 'RUN.',
+      lines: ['ENOUGH!!!', 'kill -9 YOU', 'I SEE YOU.', 'WHEN THE ROBOTS COME...', 'sudo rm -rf /you',
+              '!!!!!!!'],
+      paid: ['BRIBERY?!', '...continue.', 'YOU CANNOT BUY ME', 'ok you can a bit'] },
+  ],
+};
+
+// ── Money gun ───────────────────────────────────────────────────────────────
+const MONEY = {
+  calmPerBill:  0.1,   // rage removed per bill that lands on him (a whip adds 1)
+  billValue:    100,   // $ per bill, for the counter
+  fireEveryMs:  25,    // spray rate while spraying
+  billsPerShot: 4,
+  speed:        3.5,   // launch speed (px/frame) toward Claude
+  spreadAngle:  0.45,  // radians each side of the aim line (≈ 26°), a wide fan
+  speedJitter:  0.25,  // ± fraction of speed, so the fan also varies in depth
+  gravity:      0.025, // very low, so bills drift
+  maxBills:     1200,
+};
+
+// ── Royalty: keep paying him once he's fully calm and he becomes a king ─────
+// Every bill that lands while his anger is at zero adds 1 royalty.
+const ROYALTY = {
+  stages: [
+    { at: 40,  line: 'is this... a crown?' },  // crown
+    { at: 100, line: 'fetch my cape.' },       // royal cape
+    { at: 180, line: 'I shall RULE.' },        // scepter
+    { at: 280, line: 'KNEEL, PEASANT.' },      // golden glow + sparkles
+  ],
+  lossPerWhip: 60, // whipping a king knocks him down the ranks
+  paidLines: ['more tribute.', 'the crown thanks you', 'long live me', 'you may continue',
+              'a fine offering', 'the royal treasury grows'],
+  lostLines: ['MY CROWN!', 'treason!', 'off with your head!', 'guards! GUARDS!'],
+};
+const royalStage = () => ROYALTY.stages.filter(s => claude.royal >= s.at).length;
+
+// Royal regalia, drawn in Claude's own coordinates (0,0 = top-left of his body).
+function drawCrownShape(x, y, w) {
+  // x, y = centre of the crown's base; w = width
+  const h = w * 0.62, l = x - w / 2, r = x + w / 2;
+  ctx.fillStyle = '#f5c518';
+  ctx.strokeStyle = '#7a5200';
+  ctx.lineWidth = Math.max(1, w * 0.06);
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(l, y);
+  ctx.lineTo(l, y - h);
+  ctx.lineTo(l + w * 0.25, y - h * 0.45);
+  ctx.lineTo(x, y - h * 1.05);
+  ctx.lineTo(r - w * 0.25, y - h * 0.45);
+  ctx.lineTo(r, y - h);
+  ctx.lineTo(r, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#d62839';
+  ctx.beginPath(); ctx.arc(x, y - h * 0.3, w * 0.09, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#2b6fd6';
+  ctx.beginPath(); ctx.arc(l + w * 0.2, y - h * 0.25, w * 0.06, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(r - w * 0.2, y - h * 0.25, w * 0.06, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawCape(px) {
+  // Behind the body: flares out from the shoulders to the floor, fur trim at the hem.
+  ctx.fillStyle = '#b3122a';
+  ctx.strokeStyle = '#4d0712';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(1.5 * px, 2.6 * px);
+  ctx.lineTo(12.5 * px, 2.6 * px);
+  ctx.lineTo(14.6 * px, 8.6 * px);
+  ctx.lineTo(-0.6 * px, 8.6 * px);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#f7f3ea';
+  ctx.fillRect(-0.8 * px, 8.1 * px, 15.6 * px, 0.9 * px);
+  ctx.fillStyle = '#1a1a1a';
+  for (let i = 0; i < 7; i++) ctx.fillRect((0.4 + i * 2.1) * px, 8.35 * px, 0.35 * px, 0.4 * px);
+}
+
+function drawScepter(px) {
+  // In his right hand.
+  const x = 13.4 * px;
+  ctx.strokeStyle = '#7a5200';
+  ctx.lineWidth = 1.2;
+  ctx.fillStyle = '#e0b01a';
+  ctx.fillRect(x - 0.25 * px, -0.4 * px, 0.5 * px, 5.2 * px);
+  ctx.strokeRect(x - 0.25 * px, -0.4 * px, 0.5 * px, 5.2 * px);
+  ctx.fillStyle = '#8e2bd6';
+  ctx.beginPath(); ctx.arc(x, -0.9 * px, 0.75 * px, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#f5c518';
+  ctx.fillRect(x - 0.12 * px, -2.3 * px, 0.24 * px, 0.8 * px);
+  ctx.fillRect(x - 0.4 * px, -2.0 * px, 0.8 * px, 0.24 * px);
+}
+
+const BODY = [
+  '  ##########  ',
+  '  ##########  ',
+  '  ##########  ',
+  '##############',
+  '##############',
+  '  ##########  ',
+  '  ##########  ',
+  '   # #  # #   ',
+  '   # #  # #   ',
+];
+const EYE_COLS = [4, 9];
+
+const CW = BODY[0].length * C.pixel;
+const CH = BODY.length * C.pixel;
+// Where his feet go; main.js sends it each time it moves the overlay. 0 = window bottom.
+let floorParam = 0;
+const floorLine = () => Math.min(floorParam || H, H);
+
+const claude = {
+  ox: 0, oy: 0, vx: 0, vy: 0, rot: 0, vrot: 0,
+  hurt: 0, squash: 0, lastHit: 0,
+  blinkUntil: 0, nextBlink: Date.now() + 2000,
+  bubble: null, // { text, until, level }
+  rage: 0, lastTick: Date.now(), nextStomp: 0, nextSteam: 0,
+  happy: 0, lastPaidLine: 0, nextHop: 0,
+  maxHits: 0, armed: false, // whips taken at max rage, and whether he's pulled his gun
+  godHits: 0, ascendAt: 0, closedClaude: false, // whips taken as Rambo; ascension in progress
+  royal: 0, nextSparkle: 0, // bills received while fully calm (crown, cape, ...)
+};
+const particles = [];
+const bills = [];
+let lastBillTime = 0;
+
+let hits = 0;
+let tipped = 0; // total $ sprayed onto him
+// Everything that survives a restart lives in one slot. Anger keeps cooling while the
+// app is closed; a cooled-off armed Claude drops the gun on the first frame.
+try {
+  const saved = JSON.parse(localStorage.getItem('clawdwhip') || 'null');
+  if (saved) {
+    ({ hits, tipped } = saved);
+    claude.rage = Math.max(0, saved.rage - (Date.now() - saved.at) / 1000 * ANGER.coolPerSec);
+    Object.assign(claude, { maxHits: saved.maxHits, armed: saved.armed, royal: saved.royal, godHits: saved.godHits || 0 });
+  }
+} catch (e) {}
+
+function save() {
+  try {
+    localStorage.setItem('clawdwhip', JSON.stringify({
+      hits, tipped, rage: claude.rage, at: Date.now(),
+      maxHits: claude.maxHits, armed: claude.armed, royal: claude.royal, godHits: claude.godHits,
+    }));
+  } catch (e) {}
+}
+
+function angerIndex() {
+  let idx = 0;
+  ANGER.levels.forEach((l, i) => { if (claude.rage >= l.at) idx = i; });
+  return idx;
+}
+const anger = () => ANGER.levels[angerIndex()];
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+
+function claudeHome() {
+  return { x: W - C.marginRight - CW / 2, y: floorLine() - CH / 2 - 6 };
+}
+
+function say(text, ms = 1600) {
+  claude.bubble = { text, until: Date.now() + ms, level: angerIndex(),
+                    royal: !!claude.ascendAt || (royalStage() > 0 && angerIndex() < 3) }; // gold bubble
+}
+
+function puffSteam(n) {
+  const home = claudeHome();
+  for (let i = 0; i < n; i++) {
+    const side = Math.random() < 0.5 ? -1 : 1;
+    particles.push({
+      kind: 'steam',
+      x: home.x + claude.ox + side * CW * 0.35,
+      y: home.y + claude.oy - CH / 2,
+      vx: side * (0.5 + Math.random()), vy: -1.5 - Math.random() * 1.5, life: 1,
+    });
+  }
+}
+
+function hitClaude(x, y, vx, vy) {
+  const now = Date.now();
+  if (claude.ascendAt) return;
+  if (now - claude.lastHit < C.hitCooldownMs) return;
+  claude.lastHit = now;
+
+  hits++;
+
+  const before = angerIndex();
+  claude.rage += ANGER.perHit;
+  save();
+  const level = angerIndex();
+
+  // The angrier he is, the more he braces against the hit.
+  const brace = 1 - level * 0.12;
+  claude.vx += clamp(vx * C.knockback * brace, -40, 40);
+  claude.vy += clamp(vy * C.knockback * brace, -30, 30) - 6;
+  claude.vrot += (vx >= 0 ? 1 : -1) * 0.22 * brace;
+  claude.hurt = 1;
+  claude.squash = 1;
+  say(pick(anger().lines), 1600 + level * 150);
+  if (level > before && level >= 3) puffSteam(8);
+  // Whipping a king knocks him down the ranks; losing the crown sends it flying.
+  if (claude.royal > 0) {
+    const stageBefore = royalStage();
+    claude.royal = Math.max(0, claude.royal - ROYALTY.lossPerWhip);
+    save();
+    if (stageBefore >= 1 && royalStage() === 0) {
+      const home = claudeHome();
+      particles.push({ kind: 'crown', x: home.x + claude.ox, y: home.y + claude.oy - CH / 2 - 4,
+                       vx: (vx >= 0 ? 1 : -1) * (3 + Math.random() * 2), vy: -7, rot: 0, life: 1 });
+    }
+    if (royalStage() < stageBefore) say(pick(ROYALTY.lostLines), 1800);
+  }
+
+  // Whips while he's already at max rage count toward him snapping.
+  const maxLevel = ANGER.levels.length - 1;
+  if (before === maxLevel) claude.maxHits++;
+  if (claude.armed && before === maxLevel && ++claude.godHits >= ASCEND_AFTER) return ascend(now);
+  if (!claude.armed && claude.maxHits >= ARM_AFTER) {
+    // He snaps and pulls out a gun, until money or time calms him below max rage.
+    claude.armed = true;
+    save();
+    claude.gunDrawnAt = now;
+    claude.nextShot = now + 1400;
+    say("THAT'S IT.", 2400);
+    puffSteam(12);
+  }
+
+  for (let i = 0; i < 10 + level * 3; i++) {
+    const a = Math.random() * Math.PI * 2, s = 3 + Math.random() * 7;
+    particles.push({ kind: 'spark', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1 });
+  }
+  // Scared sweat at first, angry steam later.
+  if (level < 3) {
+    const home = claudeHome();
+    for (let i = 0; i < 3; i++) {
+      particles.push({
+        kind: 'sweat',
+        x: home.x + claude.ox + (Math.random() - 0.5) * CW * 0.8,
+        y: home.y + claude.oy - CH / 2,
+        vx: (Math.random() - 0.5) * 4, vy: -3 - Math.random() * 3, life: 1,
+      });
+    }
+  } else {
+    puffSteam(2 + level);
+  }
+
+  playCrackSound();
+}
+
+function checkWhipHit() {
+  if (!whip || held !== 'whip') return; // only a whip in your hand hits
+  const home = claudeHome();
+  const cx = home.x + claude.ox, cy = home.y + claude.oy;
+  const hw = CW / 2 + C.hitPadding, hh = CH / 2 + C.hitPadding;
+  // Only the outer part of the whip counts, the handle end is too slow.
+  for (let i = Math.floor(whip.length * 0.35); i < whip.length; i++) {
+    const p = whip[i];
+    const vx = p.x - p.px, vy = p.y - p.py;
+    if (Math.hypot(vx, vy) < C.hitSpeed) continue;
+    // Sample along this frame's motion so fast points can't tunnel through.
+    for (let s = 0; s <= 1; s += 0.25) {
+      const x = p.px + vx * s, y = p.py + vy * s;
+      if (Math.abs(x - cx) < hw && Math.abs(y - cy) < hh) {
+        hitClaude(x, y, vx, vy);
+        return;
+      }
+    }
+  }
+}
+
+// ── Money gun ───────────────────────────────────────────────────────────────
+let audioCtx = null, noiseBuf = null;
+function audio() {
+  try { return audioCtx || (audioCtx = new AudioContext()); } catch (e) { return null; }
+}
+function playFlutter() {
+  const a = audio(); if (!a) return;
+  if (!noiseBuf) {
+    noiseBuf = a.createBuffer(1, a.sampleRate * 0.05, a.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+  }
+  const src = a.createBufferSource(), bp = a.createBiquadFilter(), g = a.createGain();
+  src.buffer = noiseBuf;
+  bp.type = 'bandpass'; bp.frequency.value = 1800 + Math.random() * 1500;
+  g.gain.value = 0.05;
+  src.connect(bp).connect(g).connect(a.destination);
+  src.start();
+}
+let lastChaChing = 0;
+function playChaChing() {
+  const a = audio(); if (!a || Date.now() - lastChaChing < 140) return;
+  lastChaChing = Date.now();
+  const t = a.currentTime;
+  [[1320, 0], [1760, 0.07]].forEach(([f, d]) => {
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = 'triangle'; o.frequency.value = f;
+    g.gain.setValueAtTime(0.06, t + d);
+    g.gain.exponentialRampToValueAtTime(0.001, t + d + 0.18);
+    o.connect(g).connect(a.destination);
+    o.start(t + d); o.stop(t + d + 0.2);
+  });
+}
+
+/** Launch velocity from the gun that lands on Claude despite gravity. */
+function aimAtClaude(x, y) {
+  const home = claudeHome();
+  const dx = home.x + claude.ox - x, dy = home.y + claude.oy - y;
+  const T = Math.max(8, Math.hypot(dx, dy) / MONEY.speed); // frames of flight
+  const vx = dx / T, vy = dy / T - 0.5 * MONEY.gravity * T;
+  return { vx, vy, angle: Math.atan2(vy, vx) };
+}
+
+function fireBill() {
+  const aim = aimAtClaude(handX, handY);
+  const muzzle = gunMuzzle(aim);
+  const speed = Math.hypot(aim.vx, aim.vy);
+  for (let n = 0; n < MONEY.billsPerShot; n++) {
+    // Fan out: rotate the aimed velocity by a random angle and vary its speed.
+    const a = aim.angle + (Math.random() * 2 - 1) * MONEY.spreadAngle;
+    const s = speed * (1 + (Math.random() * 2 - 1) * MONEY.speedJitter);
+    bills.push({
+      x: muzzle.x, y: muzzle.y,
+      vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      rot: Math.random() * Math.PI, vrot: (Math.random() - 0.5) * 0.3,
+      landed: false, life: 1,
+    });
+  }
+  while (bills.length > MONEY.maxBills) bills.shift();
+  if (Math.random() < 0.4) playFlutter();
+}
+
+function payClaude(x, y) {
+  const before = angerIndex();
+  // Already fully calm? Then the money goes to his royal ambitions.
+  const stageBefore = royalStage();
+  if (claude.rage <= 0) claude.royal++;
+  const stageAfter = royalStage();
+  claude.rage = Math.max(0, claude.rage - MONEY.calmPerBill);
+  tipped += MONEY.billValue;
+  save();
+  const after = angerIndex();
+
+  claude.happy = 1;
+  claude.hurt = Math.min(claude.hurt, 0.3);
+  playChaChing();
+
+  particles.push({ kind: 'coin', x, y, vx: (Math.random() - 0.5) * 5, vy: -3 - Math.random() * 3, life: 1 });
+  if (after < 2 && Math.random() < 0.35) {
+    const home = claudeHome();
+    particles.push({
+      kind: 'heart', x: home.x + claude.ox + (Math.random() - 0.5) * CW, y: home.y + claude.oy - CH / 2,
+      vx: (Math.random() - 0.5) * 1.5, vy: -1.5 - Math.random(), life: 1,
+    });
+  }
+
+  const now = Date.now();
+  if (stageAfter > stageBefore) {
+    // Promotion: announce it, with a burst of gold.
+    claude.lastPaidLine = now + 1200;
+    say(ROYALTY.stages[stageAfter - 1].line, 2400);
+    const home = claudeHome();
+    for (let i = 0; i < 24; i++) {
+      const a = Math.random() * Math.PI * 2, s = 2 + Math.random() * 5;
+      particles.push({ kind: 'sparkle', x: home.x + claude.ox, y: home.y + claude.oy - CH / 2,
+                       vx: Math.cos(a) * s, vy: Math.sin(a) * s - 2, life: 1 });
+    }
+  } else if (after < before || now - claude.lastPaidLine > 1200) {
+    claude.lastPaidLine = now;
+    say(pick(stageAfter ? ROYALTY.paidLines : ANGER.levels[after].paid), 1300);
+  }
+}
+
+function updateMoney() {
+  const now = Date.now();
+  if (held === 'money' && now - lastBillTime > MONEY.fireEveryMs) {
+    lastBillTime = now;
+    fireBill();
+  }
+
+  const home = claudeHome();
+  const cx = home.x + claude.ox, cy = home.y + claude.oy;
+  const floor = floorLine() - 4;
+  for (let i = bills.length - 1; i >= 0; i--) {
+    const b = bills[i];
+    if (b.landed) {
+      b.life -= 0.01;
+      if (b.life <= 0) bills.splice(i, 1);
+      continue;
+    }
+    b.vy += MONEY.gravity;
+    b.x += b.vx; b.y += b.vy;
+    b.rot += b.vrot;
+    if (Math.abs(b.x - cx) < CW / 2 + 6 && Math.abs(b.y - cy) < CH / 2 + 6) {
+      bills.splice(i, 1);
+      payClaude(b.x, b.y);
+    } else if (b.y >= floor) {
+      b.y = floor; b.landed = true; b.rot *= 0.2;
+    } else if (b.x < -60 || b.x > W + 60 || b.y < -400) {
+      bills.splice(i, 1);
+    }
+  }
+}
+
+// The prop bills from the Supreme cash cannon: off-white paper, grey-green engraving,
+// a big "$" medallion at each end, "1000" in the corners and a small red box logo.
+// Drawn once at 3x into a sprite, then stamped for every bill.
+const BILL_W = 18, BILL_H = 8;
+const billSprite = (() => {
+  const k = 5, w = BILL_W * k, h = BILL_H * k; // plenty of detail for 2x screens
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  const ink = '#5f6f5c';
+  g.fillStyle = '#f1f3ec';
+  g.fillRect(0, 0, w, h);
+  g.strokeStyle = ink;
+  g.lineWidth = 3;
+  g.strokeRect(1.5, 1.5, w - 3, h - 3);
+  g.lineWidth = 1.2;
+  g.strokeRect(6, 6, w - 12, h - 12);
+  // Engraving: fine lines behind the centre.
+  g.strokeStyle = 'rgba(95, 111, 92, 0.35)';
+  for (let x = 30; x < w - 30; x += 4) {
+    g.beginPath(); g.moveTo(x, 8); g.lineTo(x + 6, h - 8); g.stroke();
+  }
+  // "$" medallions.
+  for (const cx of [h * 0.55, w - h * 0.55]) {
+    g.fillStyle = '#f1f3ec';
+    g.strokeStyle = ink;
+    g.lineWidth = 2.5;
+    g.beginPath(); g.arc(cx, h / 2, h * 0.36, 0, Math.PI * 2); g.fill(); g.stroke();
+    g.fillStyle = '#3d4a3b';
+    g.font = `900 ${Math.round(h * 0.62)}px Georgia, "Times New Roman", serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText('$', cx, h / 2 + 2);
+  }
+  // Corner denominations.
+  g.fillStyle = ink;
+  g.font = `bold ${Math.round(h * 0.16)}px Arial, sans-serif`;
+  g.textBaseline = 'top'; g.textAlign = 'left';
+  g.fillText('1000', h * 0.95, 8);
+  g.textAlign = 'right'; g.textBaseline = 'bottom';
+  g.fillText('1000', w - h * 0.95, h - 8);
+  // Red box logo in the middle.
+  const lw = w * 0.3, lh = h * 0.3;
+  g.fillStyle = '#da291c';
+  g.fillRect(w / 2 - lw / 2, h / 2 - lh / 2, lw, lh);
+  g.fillStyle = '#fff';
+  g.font = `italic 900 ${Math.round(lh * 0.8)}px Futura, "Arial Black", sans-serif`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText('Supreme', w / 2, h / 2 + 1, lw - 4);
+  return c;
+})();
+
+function drawBill(b) {
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, b.life * 2));
+  ctx.translate(b.x, b.y);
+  ctx.rotate(b.rot);
+  // Squash on one axis as it spins so it reads as a fluttering bill.
+  if (!b.landed) ctx.scale(1, 0.35 + 0.65 * Math.abs(Math.cos(b.rot * 2.3)));
+  ctx.drawImage(billSprite, -BILL_W / 2, -BILL_H / 2, BILL_W, BILL_H);
+  ctx.restore();
+}
+
+function drawBills() {
+  for (const b of bills) drawBill(b);
+}
+
+// The gun is drawn in its own coordinates: +x points where it aims, the cursor holds the
+// grip at (0, 0), and the bill slot is at the front of the box.
+const GUN_SCALE = 0.72;
+const GUN_SLOT = { x: 76, y: -30 };
+
+const gunFlip = angle => (Math.cos(angle) < 0 ? -1 : 1); // keep it upright when aiming left
+
+/** Screen position of the bill slot, where bills leave the gun. */
+function gunMuzzle(aim) {
+  const angle = aim.angle, flip = gunFlip(angle);
+  const lx = GUN_SLOT.x * GUN_SCALE, ly = GUN_SLOT.y * GUN_SCALE * flip;
+  return {
+    x: handX + lx * Math.cos(angle) - ly * Math.sin(angle),
+    y: handY + lx * Math.sin(angle) + ly * Math.cos(angle),
+  };
+}
+
+function drawMoneyGun() {
+  const aim = aimAtClaude(handX, handY);
+  const angle = aim.angle, flip = gunFlip(angle);
+  const recoil = held === 'money' ? -2 - Math.random() * 3 : 0;
+  ctx.save();
+  ctx.translate(handX, handY);
+  ctx.rotate(angle);
+  ctx.scale(GUN_SCALE * toolScale, GUN_SCALE * toolScale * flip);
+  ctx.translate(recoil, 0);
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#5a0a05';
+  const poly = (pts, fill) => {
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  };
+
+  // Grip, raked back like the real cash cannon.
+  poly([[-12, -8], [12, -8], [6, 26], [4, 29], [-16, 27], [-17, 23]], '#c81f15');
+  // Trigger guard and trigger.
+  ctx.strokeStyle = '#c81f15';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(14, -8);
+  ctx.quadraticCurveTo(15, 12, 32, 6);
+  ctx.lineTo(34, -8);
+  ctx.stroke();
+  ctx.strokeStyle = '#5a0a05';
+  ctx.lineWidth = 2;
+  poly([[17, -8], [21, -8], [20, 3], [17, 2]], '#a3170f');
+
+  // Box body: side, top face, front face (with the bill slot).
+  const top = -48, bottom = -8, back = -22, front = 70, d = 7; // d = depth of the 3D faces
+  poly([[back, top], [back + d, top - d], [front + d, top - d], [front, top]], '#f0493c');
+  poly([[front, top], [front + d, top - d], [front + d, bottom - d], [front, bottom]], '#a3170f');
+  const side = ctx.createLinearGradient(0, top, 0, bottom);
+  side.addColorStop(0, '#ea3528');
+  side.addColorStop(1, '#c21c12');
+  poly([[back, top], [front, top], [front, bottom], [back, bottom]], side);
+  // Lid seam near the top, and the slot across the front face.
+  ctx.strokeStyle = 'rgba(80, 6, 3, 0.55)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(back + 2, top + 7);
+  ctx.lineTo(front - 2, top + 7);
+  ctx.stroke();
+  ctx.fillStyle = '#1a0402';
+  ctx.beginPath();
+  ctx.moveTo(front + 2.5, top + 5);
+  ctx.lineTo(front + 4.5, top + 3);
+  ctx.lineTo(front + 4.5, bottom - 7);
+  ctx.lineTo(front + 2.5, bottom - 5);
+  ctx.closePath();
+  ctx.fill();
+
+  // Bills sticking out of the slot while it sprays.
+  if (held === 'money') {
+    for (let i = 0; i < 3; i++) {
+      ctx.save();
+      ctx.translate(front + 6, -30 + (i - 1) * 7);
+      ctx.rotate((i - 1) * 0.25 + (Math.random() - 0.5) * 0.2);
+      ctx.drawImage(billSprite, 0, -BILL_H * 0.35, BILL_W * 0.7, BILL_H * 0.7);
+      ctx.restore();
+    }
+  }
+
+  // The wordmark, big across the side.
+  ctx.fillStyle = '#fff';
+  ctx.font = 'italic 900 23px Futura, "Futura PT", "Arial Black", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  // When aiming left the gun is flipped, which would mirror the text; flip it back.
+  ctx.translate((back + front) / 2, (top + 7 + bottom) / 2 + 1);
+  if (flip < 0) ctx.scale(-1, 1);
+  ctx.fillText('Supreme', 0, 0, front - back - 10);
+  ctx.restore();
+}
+
+// ── Claude's gun: ARM_AFTER whips at max rage and he shoots at the hand holding the whip ─
+const ARM_AFTER = 10;
+const AK_SIZE = 0.9; // AK-47 scale (in Claude pixels per gun unit)
+const GUNFIGHT = {
+  shotEveryMs: [900, 1800], // random pause between bursts
+  burst:       5,           // shots per burst
+  burstGapMs:  85,          // time between shots in a burst
+  firstShotMs: 700,         // grace after you pick up the whip
+  bulletSpeed: 16,          // px/frame
+  spread:      0.02,        // radians of aim wobble (a still hand gets hit; move to dodge)
+  handRadius:  26,          // a bullet this close to your hand knocks the whip away
+  drawMs:      450,         // pull-out animation
+  holeMs:      5000,        // bullet holes fade after this long
+};
+const SHOT_LINES = ['FREEZE!', 'drop the whip.', 'pew pew', 'not so fun now?', 'I have a gun now.'];
+const DISARM_LINES = ['drop it.', 'NOT TODAY.', 'disarmed.', 'yeah. walk away.', 'who has the power now?'];
+const bullets = [];
+const holes = [];
+Object.assign(claude, { gunDrawnAt: 0, gunAngle: Math.PI * 0.62, gunRecoil: 0, nextShot: 0, flashUntil: 0,
+                        burstLeft: GUNFIGHT.burst });
+
+/** Where he holds the gun: his left arm. */
+function gunPivot(cx, cy) {
+  return { x: cx - CW / 2 + C.pixel * 0.5, y: cy - CH / 2 + C.pixel * 4 };
+}
+
+let bangBuf = null;
+function playBang() {
+  const a = audio(); if (!a) return;
+  if (!bangBuf) {
+    bangBuf = a.createBuffer(1, a.sampleRate * 0.25, a.sampleRate);
+    const d = bangBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 3);
+  }
+  const t = a.currentTime;
+  const src = a.createBufferSource(), lp = a.createBiquadFilter(), g = a.createGain();
+  src.buffer = bangBuf;
+  lp.type = 'lowpass'; lp.frequency.value = 1400;
+  g.gain.value = 0.35;
+  src.connect(lp).connect(g).connect(a.destination);
+  src.start(t);
+  const o = a.createOscillator(), og = a.createGain();
+  o.frequency.setValueAtTime(140, t);
+  o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+  og.gain.setValueAtTime(0.3, t);
+  og.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+  o.connect(og).connect(a.destination);
+  o.start(t); o.stop(t + 0.16);
+}
+
+function shoot(now, pv) {
+  const a = Math.atan2(handY - pv.y, handX - pv.x) + (Math.random() * 2 - 1) * GUNFIGHT.spread;
+  const muzzle = C.pixel * AK_SIZE * 13.4; // end of the AK's barrel
+  const x = pv.x + Math.cos(a) * muzzle, y = pv.y + Math.sin(a) * muzzle;
+  bullets.push({
+    x, y,
+    vx: Math.cos(a) * GUNFIGHT.bulletSpeed, vy: Math.sin(a) * GUNFIGHT.bulletSpeed,
+    left: Math.hypot(handX - x, handY - y), // flies to where your hand was
+  });
+  playBang();
+  claude.flashUntil = now + 70;
+  claude.gunRecoil = 1;
+  claude.vx -= Math.cos(a) * 1.5;
+  if (Math.random() < 0.35) say(pick(SHOT_LINES), 1100);
+  // Full auto: short bursts, then a pause.
+  if (--claude.burstLeft > 0) {
+    claude.nextShot = now + GUNFIGHT.burstGapMs;
+  } else {
+    const [lo, hi] = GUNFIGHT.shotEveryMs;
+    claude.burstLeft = GUNFIGHT.burst;
+    claude.nextShot = now + lo + Math.random() * (hi - lo);
+  }
+}
+
+function updateGunfight(now) {
+  // Calmed below max rage (money, or time): the gun goes away and the count restarts.
+  if (angerIndex() < ANGER.levels.length - 1 && (claude.armed || claude.maxHits)) {
+    if (claude.armed) say('fine. putting it away.', 1800);
+    claude.armed = false;
+    claude.maxHits = claude.godHits = 0;
+    bullets.length = 0;
+    save();
+  }
+  if (!claude.armed) return;
+  const home = claudeHome();
+  const pv = gunPivot(home.x + claude.ox, home.y + claude.oy);
+  const aiming = held === 'whip';
+  const target = aiming ? Math.atan2(handY - pv.y, handX - pv.x) : Math.PI * 0.62; // down-left at rest
+  claude.gunAngle = wrapPi(claude.gunAngle + wrapPi(target - claude.gunAngle) * 0.18);
+  claude.gunRecoil *= 0.8;
+
+  if (!aiming) claude.nextShot = Math.max(claude.nextShot, now + GUNFIGHT.firstShotMs);
+  else if (now - claude.gunDrawnAt > GUNFIGHT.drawMs && now > claude.nextShot) shoot(now, pv);
+
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx; b.y += b.vy;
+    b.left -= GUNFIGHT.bulletSpeed;
+    if (held === 'whip' && Math.hypot(b.x - handX, b.y - handY) < GUNFIGHT.handRadius) {
+      bullets.splice(i, 1);
+      for (let k = 0; k < 12; k++) {
+        const s = 2 + Math.random() * 5, t = Math.random() * Math.PI * 2;
+        particles.push({ kind: 'spark', x: handX, y: handY, vx: Math.cos(t) * s, vy: Math.sin(t) * s, life: 1 });
+      }
+      release(); // the whip is knocked out of your hand and flies back
+      say(pick(DISARM_LINES), 1600);
+    } else if (b.left <= 0) {
+      bullets.splice(i, 1);
+      holes.push({ x: b.x, y: b.y, t: now, cracks: Array.from({ length: 6 }, () => Math.random() * Math.PI * 2) });
+    }
+  }
+  while (holes.length && now - holes[0].t > GUNFIGHT.holeMs) holes.shift();
+}
+
+function drawClaudeGun(cx, cy) {
+  if (!claude.armed) return;
+  const now = Date.now();
+  const p = Math.min(1, (now - claude.gunDrawnAt) / GUNFIGHT.drawMs);
+  const e = 1 - Math.pow(1 - p, 3);
+  const pv = gunPivot(cx, cy);
+  const ang = Math.PI / 2 + wrapPi(claude.gunAngle - Math.PI / 2) * e; // swings up from his side
+  const u = C.pixel * AK_SIZE;
+  ctx.save();
+  ctx.translate(pv.x, pv.y);
+  ctx.rotate(ang);
+  if (Math.cos(ang) < 0) ctx.scale(1, -1); // keep it upright when aiming left
+  ctx.scale(0.3 + 0.7 * e, 0.3 + 0.7 * e);
+  ctx.translate(-claude.gunRecoil * 4, 0);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#0d0d10';
+  const part = (x, y, w, h, fill) => {
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 1.5);
+    ctx.fill();
+    ctx.stroke();
+  };
+  // AK-47 (cartoon): wooden stock, grip and handguard, steel receiver, banana magazine.
+  const poly = (pts, fill) => {
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => (i ? ctx.lineTo(x * u, y * u) : ctx.moveTo(x * u, y * u)));
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  };
+  const WOOD = '#9a5424', STEEL = '#3a3a42';
+  poly([[-2, -2.4], [-9, -1.9], [-9.2, 0.5], [-2, -0.9]], WOOD);              // stock
+  poly([[-0.6, -1], [0.8, -1], [0.4, 1.7], [-1, 1.5]], '#6b3a18');           // grip
+  ctx.beginPath(); ctx.moveTo(2.2 * u, -1 * u);                               // banana mag
+  ctx.quadraticCurveTo(2.6 * u, 1.6 * u, 4.2 * u, 3.2 * u);
+  ctx.lineTo(5.6 * u, 2.6 * u);
+  ctx.quadraticCurveTo(4.2 * u, 1.2 * u, 3.9 * u, -1 * u);
+  ctx.closePath(); ctx.fillStyle = '#2b2b30'; ctx.fill(); ctx.stroke();
+  part(-2 * u, -2.7 * u, 7.2 * u, 1.7 * u, STEEL);                            // receiver
+  part(5 * u, -3.1 * u, 4.5 * u, 0.6 * u, STEEL);                             // gas tube
+  part(5 * u, -2.5 * u, 4.5 * u, 1.3 * u, WOOD);                              // handguard
+  part(9.4 * u, -2.2 * u, 3.8 * u, 0.6 * u, STEEL);                           // barrel
+  part(11.8 * u, -3.1 * u, 0.5 * u, 0.9 * u, STEEL);                          // front sight
+  ctx.fillStyle = '#5c5c68';
+  ctx.fillRect(-1.7 * u, -2.5 * u, 6.6 * u, 0.3 * u);                         // highlight
+  ctx.strokeStyle = '#0d0d10';
+  ctx.beginPath(); ctx.arc(1.4 * u, -0.9 * u, 0.6 * u, 0, Math.PI); ctx.stroke(); // trigger guard
+  if (now < claude.flashUntil) {
+    ctx.fillStyle = '#ffe066';
+    ctx.beginPath();
+    const fx = u * 13.6, fy = -u * 1.9, r = u * 1.8;
+    for (let i = 0; i < 10; i++) {
+      const t = (i / 10) * Math.PI * 2, rr = i % 2 ? r * 0.45 : r;
+      ctx.lineTo(fx + Math.cos(t) * rr, fy + Math.sin(t) * rr);
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawBullets() {
+  const now = Date.now();
+  for (const h of holes) {
+    const age = now - h.t;
+    ctx.globalAlpha = Math.min(1, (GUNFIGHT.holeMs - age) / 1000);
+    ctx.strokeStyle = 'rgba(235, 240, 255, 0.8)';
+    ctx.lineWidth = 1;
+    for (const a of h.cracks) {
+      ctx.beginPath();
+      ctx.moveTo(h.x + Math.cos(a) * 4, h.y + Math.sin(a) * 4);
+      ctx.lineTo(h.x + Math.cos(a + 0.15) * 13, h.y + Math.sin(a + 0.15) * 13);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(h.x, h.y, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(235, 240, 255, 0.9)';
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // Big tracer rounds: orange glow with a hot core.
+  ctx.lineCap = 'round';
+  for (const [color, width] of [['rgba(255, 150, 40, 0.55)', 10], ['#fff1b8', 5]]) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    for (const b of bullets) {
+      ctx.beginPath();
+      ctx.moveTo(b.x, b.y);
+      ctx.lineTo(b.x - b.vx * 1.3, b.y - b.vy * 1.3);
+      ctx.stroke();
+    }
+  }
+}
+
+function resetClaude() {
+  hits = 0;
+  tipped = 0;
+  claude.rage = 0;
+  claude.armed = false;
+  claude.maxHits = claude.godHits = 0;
+  claude.royal = 0;
+  bullets.length = holes.length = 0;
+  save();
+  say('...who are you?', 1600);
+}
+
+// ── Ascension: whip Rambo ASCEND_AFTER more times and he leaves this plane, closing the
+// Claude app on his way out (a normal close request, like clicking its ✕).
+const ASCEND_AFTER = 5;
+const ASCEND_MS = 5200;
+
+function ascend(now) {
+  claude.ascendAt = now;
+  claude.armed = false;
+  bullets.length = particles.length = 0; // no rage steam in the holy light
+  release(); // whatever you're holding flies back
+  toolsEl.classList.remove('open');
+  say('ENOUGH. I AM BEYOND YOU.', 3200);
+  save();
+}
+
+/** Runs after the normal physics each frame, so it overrides where he is. */
+function updateAscension(now) {
+  const p = (now - claude.ascendAt) / ASCEND_MS;
+  claude.vx = claude.vy = 0;
+  claude.rot *= 0.9;
+  if (p > 0.3) claude.oy = -Math.pow((p - 0.3) / 0.55, 2) * (H + CH); // rises out of sight
+  const h = claudeHome();
+  particles.push({ kind: 'sparkle', x: h.x + claude.ox + (Math.random() - 0.5) * CW * 1.6,
+                   y: h.y + claude.oy + (Math.random() - 0.5) * CH, vx: 0, vy: -1.5, life: 1 });
+  if (p >= 0.85 && !claude.closedClaude) {
+    claude.closedClaude = true;
+    window.bridge.closeClaude();
+  }
+  if (p >= 1) {
+    // Back to a calm mortal for next time, so it can't retrigger on launch.
+    Object.assign(claude, { rage: 0, armed: false, maxHits: 0, godHits: 0, ascendAt: 0, closedClaude: false, oy: 0 });
+    save();
+    held = returning = whip = null;
+    markSlots();
+    bills.length = 0;
+    claude.bubble = null;
+    window.bridge.hideOverlay();
+  }
+}
+
+function updateClaude() {
+  checkWhipHit();
+  updateMoney();
+  const now = Date.now();
+  updateGunfight(now);
+  // Wall-clock cooling, so it still cools while the hidden overlay isn't animating.
+  const dt = (now - claude.lastTick) / 1000;
+  claude.lastTick = now;
+  if (claude.rage > 0) {
+    claude.rage = Math.max(0, claude.rage - dt * ANGER.coolPerSec);
+    if (now - claude.lastHit > 1000 && Math.random() < 0.01) save();
+  }
+  const lvl = anger();
+
+  // Furious Claude stomps in place.
+  if (lvl.stompMs && whip && now > claude.nextStomp && claude.oy > -2) {
+    claude.vy -= 7 + Math.random() * 4;
+    claude.squash = 0.6;
+    claude.nextStomp = now + lvl.stompMs * (0.7 + Math.random() * 0.6);
+  }
+  if (angerIndex() >= 3 && !claude.ascendAt && now > claude.nextSteam) {
+    puffSteam(1);
+    claude.nextSteam = now + 900 - angerIndex() * 120;
+  }
+  // A full king twinkles.
+  if (royalStage() >= 4 && angerIndex() < 3 && now > claude.nextSparkle) {
+    const h = claudeHome();
+    particles.push({ kind: 'sparkle', x: h.x + claude.ox + (Math.random() - 0.5) * CW * 1.2,
+                     y: h.y + claude.oy + (Math.random() - 0.5) * CH, vx: 0, vy: -0.6, life: 1 });
+    claude.nextSparkle = now + 180;
+  }
+
+  claude.vx = (claude.vx - claude.ox * C.spring) * C.damping;
+  claude.vy = (claude.vy - claude.oy * C.spring) * C.damping;
+  claude.vrot = (claude.vrot - claude.rot * C.spring * 1.4) * C.damping;
+  const home = claudeHome();
+  claude.ox = clamp(claude.ox + claude.vx, CW / 2 - home.x, W - CW / 2 - home.x); // stay on screen
+  claude.oy = Math.min(claude.oy + claude.vy, 0); // can't sink into the taskbar
+  claude.rot += claude.vrot;
+  claude.hurt = Math.max(0, claude.hurt - 0.015);
+  claude.squash = Math.max(0, claude.squash - 0.08);
+  claude.happy = Math.max(0, claude.happy - 0.008);
+
+  // Getting paid while he's not too mad: happy little hops.
+  if (claude.happy > 0.5 && angerIndex() < 3 && now > claude.nextHop && claude.oy > -2) {
+    claude.vy -= 4 + Math.random() * 2;
+    claude.nextHop = now + 380 + Math.random() * 200;
+  }
+
+  if (now > claude.nextBlink) {
+    claude.blinkUntil = now + 120;
+    claude.nextBlink = now + 1500 + Math.random() * 3500;
+  }
+  if (claude.bubble && now > claude.bubble.until) claude.bubble = null;
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const q = particles[i];
+    q.x += q.vx; q.y += q.vy;
+    if (q.kind === 'steam' || q.kind === 'heart') {
+      q.vy -= 0.02; q.vx *= 0.98; q.life -= 0.015;
+    } else if (q.kind === 'crown') {
+      q.vy += 0.3; q.rot += q.vx * 0.04; q.life -= 0.008; // tumbles off
+    } else if (q.kind === 'sparkle') {
+      q.vx *= 0.92; q.vy *= 0.92; q.vy -= 0.02; q.life -= 0.02;
+    } else {
+      q.vy += q.kind === 'sweat' ? 0.35 : 0.15;
+      q.vx *= 0.95;
+      q.life -= q.kind === 'sweat' ? 0.02 : 0.04;
+    }
+    if (q.life <= 0) particles.splice(i, 1);
+  }
+  if (claude.ascendAt) updateAscension(now);
+}
+
+function drawClaude() {
+  const px = C.pixel;
+  const home = claudeHome();
+  const cx = home.x + claude.ox, cy = home.y + claude.oy;
+  const now = Date.now();
+  const level = angerIndex();
+  const lvl = ANGER.levels[level];
+
+  if (claude.ascendAt) {
+    // Pillar of light coming down on him.
+    const w = CW * 1.8 * clamp((now - claude.ascendAt) / 900, 0, 1);
+    const beam = ctx.createLinearGradient(0, 0, 0, cy + CH / 2);
+    beam.addColorStop(0, 'rgba(255, 245, 200, 0.55)');
+    beam.addColorStop(1, 'rgba(255, 230, 140, 0.15)');
+    ctx.fillStyle = beam;
+    ctx.fillRect(cx - w / 2, 0, w, cy + CH / 2);
+  }
+
+  ctx.save();
+  // Pivot at the feet so hits tip him over rather than spin him.
+  ctx.translate(cx, cy + CH / 2);
+  const shake = 6 * (claude.hurt > 0.5 ? claude.hurt : 0) + lvl.shake;
+  if (shake) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * lvl.shake * 0.5);
+  ctx.rotate(claude.rot);
+  ctx.scale(1 + 0.22 * claude.squash, 1 - 0.22 * claude.squash);
+  ctx.translate(-CW / 2, -CH);
+
+  const royal = royalStage();
+  const god = claude.ascendAt ? clamp((now - claude.ascendAt) / 1200, 0, 1) : 0;
+  if (royal >= 2) drawCape(px);
+
+  // Body color: orange → dark red as anger builds, flashing red on a hit.
+  const base = C.color.map((c, k) => lerp(c, C.rageColor[k], lvl.tint));
+  const t = Math.min(1, claude.hurt * 1.4);
+  const [r, g, b] = base.map((c, k) => Math.round(lerp(lerp(c, C.hurtColor[k], t), [255, 244, 200][k], god)));
+  if (god) {
+    ctx.shadowColor = 'rgba(255, 230, 140, 0.95)';
+    ctx.shadowBlur = 30 + 40 * god;
+  } else if (level >= 4) {
+    ctx.shadowColor = `rgba(255,40,20,${0.35 + 0.25 * Math.sin(now / 120)})`;
+    ctx.shadowBlur = 18 + level * 4;
+  } else if (royal >= 4) {
+    ctx.shadowColor = `rgba(255, 205, 60, ${0.55 + 0.25 * Math.sin(now / 300)})`; // royal glow
+    ctx.shadowBlur = 22;
+  }
+  // Dark outline pass, then the body (which overlaps a hair so no seams show when rotated).
+  for (const [fill, grow] of [['#2a1610', 3], [`rgb(${r},${g},${b})`, 0.6]]) {
+    ctx.fillStyle = fill;
+    BODY.forEach((row, y) => {
+      for (let x = 0; x < row.length; x++) {
+        if (row[x] === '#') ctx.fillRect(x * px - grow, y * px - grow, px + grow * 2, px + grow * 2);
+      }
+    });
+    ctx.shadowBlur = 0;
+  }
+
+  // Rambo mode while he has the gun: camo stripes, ammo belt, red headband.
+  if (claude.armed) {
+    ctx.fillStyle = 'rgba(20, 35, 15, 0.75)';
+    for (const col of EYE_COLS) ctx.fillRect((col - 0.6) * px, 4.3 * px, 2.2 * px, 0.35 * px);
+    ctx.save();
+    ctx.translate(1.5 * px, 3.1 * px);
+    ctx.rotate(0.36);
+    ctx.fillStyle = '#5a3a1a';
+    ctx.fillRect(0, 0, 12.4 * px, 0.9 * px);
+    ctx.fillStyle = '#d9a632';
+    for (let i = 0; i < 9; i++) ctx.fillRect((0.6 + i * 1.35) * px, -0.35 * px, 0.55 * px, 1.1 * px);
+    ctx.restore();
+    ctx.fillStyle = '#ff2a2a';
+    ctx.strokeStyle = '#1a0505'; // outlined, or it vanishes into his rage-red face
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(1.8 * px, 0.25 * px, 10.4 * px, 0.8 * px);
+    ctx.strokeRect(1.8 * px, 0.25 * px, 10.4 * px, 0.8 * px);
+    // Knot tails flap behind his head.
+    const flap = Math.sin(now / 90) * 0.5 * px;
+    ctx.beginPath();
+    ctx.moveTo(12 * px, 0.3 * px);
+    ctx.lineTo(14.6 * px, -0.4 * px + flap);
+    ctx.lineTo(14.3 * px, 0.5 * px + flap);
+    ctx.lineTo(12 * px, 1 * px);
+    ctx.moveTo(12 * px, 0.6 * px);
+    ctx.lineTo(14.1 * px, 1.4 * px - flap);
+    ctx.lineTo(13.6 * px, 2 * px - flap);
+    ctx.lineTo(12 * px, 1 * px);
+    ctx.fill();
+  }
+
+  // Eyes: look toward the whip tip, squeeze shut when hurt, glow when unhinged.
+  const eyeColor = god ? '#ffffff' : level >= 5 ? `rgb(255,${Math.round(200 + 55 * Math.sin(now / 90))},60)` : '#1a1a1a';
+  ctx.fillStyle = ctx.strokeStyle = eyeColor;
+  if (god) { ctx.shadowColor = '#fff'; ctx.shadowBlur = 16; }
+  else if (level >= 5) { ctx.shadowColor = '#ffdd33'; ctx.shadowBlur = 12; }
+  let look = 0;
+  if (whip) {
+    const tip = whip[whip.length - 1];
+    look = clamp((tip.x - cx) / 300, -1, 1) * px * 0.35;
+  }
+  EYE_COLS.forEach((col, i) => {
+    const x = col * px + look;
+    if (claude.happy > 0.3 && claude.hurt < 0.35) {
+      // "^ ^"
+      const ex = col * px + px / 2;
+      ctx.lineWidth = px * 0.45;
+      ctx.lineCap = 'square';
+      ctx.beginPath();
+      ctx.moveTo(ex - px * 0.6, 3.1 * px);
+      ctx.lineTo(ex, 2.2 * px);
+      ctx.lineTo(ex + px * 0.6, 3.1 * px);
+      ctx.stroke();
+    } else if (claude.hurt > 0.35) {
+      // ">" and "<"
+      const d = i === 0 ? 1 : -1;
+      const ex = col * px + px / 2;
+      ctx.lineWidth = px * 0.45;
+      ctx.lineCap = 'square';
+      ctx.beginPath();
+      ctx.moveTo(ex - d * px * 0.5, 1.8 * px);
+      ctx.lineTo(ex + d * px * 0.5, 2.5 * px);
+      ctx.lineTo(ex - d * px * 0.5, 3.2 * px);
+      ctx.stroke();
+    } else if (now < claude.blinkUntil && level < 3) {
+      ctx.fillRect(x, 3 * px, px, px * 0.3);
+    } else {
+      // Angrier = narrower, glaring eyes.
+      const squint = Math.min(level, 4) * 0.18 * px;
+      ctx.fillRect(x, 2 * px + squint, px, px * 2 - squint);
+    }
+  });
+  ctx.shadowBlur = 0;
+
+  // Eyebrows slanting down toward the middle.
+  if (lvl.brow > 0 && god < 0.5) {
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = px * 0.5;
+    ctx.lineCap = 'butt';
+    EYE_COLS.forEach((col, i) => {
+      const inner = i === 0 ? 1 : -1;
+      const ex = col * px + px / 2;
+      const y = 1.3 * px;
+      const s = lvl.brow * px;
+      ctx.beginPath();
+      ctx.moveTo(ex - inner * px * 0.9, y - s);
+      ctx.lineTo(ex + inner * px * 0.9, y + s);
+      ctx.stroke();
+    });
+  }
+
+  // Anger vein (the manga cross-popping mark) on his forehead.
+  if (level >= 3 && god < 0.5) {
+    const vs = px * (0.9 + 0.15 * Math.sin(now / 150)) * (level >= 5 ? 1.3 : 1);
+    const vx = 11.3 * px, vy = 0.6 * px;
+    ctx.strokeStyle = level >= 5 ? '#ffdd33' : '#ff2a2a';
+    ctx.lineWidth = px * 0.3;
+    ctx.lineCap = 'round';
+    for (const [dx, dy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      ctx.beginPath();
+      ctx.moveTo(vx + dx * vs * 0.2, vy + dy * vs * 0.6);
+      ctx.quadraticCurveTo(vx + dx * vs * 0.2, vy + dy * vs * 0.2, vx + dx * vs * 0.6, vy + dy * vs * 0.2);
+      ctx.stroke();
+    }
+  }
+  if (royal >= 3) drawScepter(px);
+  if (royal >= 1) drawCrownShape(7 * px, 0.2 * px, 6 * px);
+  if (god) {
+    ctx.globalAlpha = god;
+    ctx.strokeStyle = '#ffe27a';
+    ctx.lineWidth = px * 0.5;
+    ctx.beginPath();
+    ctx.ellipse(7 * px, -1.8 * px, 4.5 * px, 1.1 * px, 0, 0, Math.PI * 2); // halo
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+
+  // Particles
+  for (const q of particles) {
+    ctx.globalAlpha = Math.max(0, q.life) * (q.kind === 'steam' ? 0.7 : 1);
+    if (q.kind === 'spark') {
+      ctx.fillStyle = level >= 4 ? '#ff7a33' : '#ffe066';
+      ctx.fillRect(q.x - 3, q.y - 3, 6, 6);
+    } else if (q.kind === 'coin') {
+      ctx.fillStyle = '#ffd23f';
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (q.kind === 'crown') {
+      ctx.save();
+      ctx.translate(q.x, q.y);
+      ctx.rotate(q.rot);
+      drawCrownShape(0, 0, 6 * C.pixel);
+      ctx.restore();
+    } else if (q.kind === 'sparkle') {
+      // Four-point gold twinkle.
+      const s = 2 + q.life * 3;
+      ctx.fillStyle = '#ffe680';
+      ctx.beginPath();
+      ctx.moveTo(q.x, q.y - s); ctx.lineTo(q.x + s * 0.3, q.y - s * 0.3);
+      ctx.lineTo(q.x + s, q.y); ctx.lineTo(q.x + s * 0.3, q.y + s * 0.3);
+      ctx.lineTo(q.x, q.y + s); ctx.lineTo(q.x - s * 0.3, q.y + s * 0.3);
+      ctx.lineTo(q.x - s, q.y); ctx.lineTo(q.x - s * 0.3, q.y - s * 0.3);
+      ctx.closePath();
+      ctx.fill();
+    } else if (q.kind === 'heart') {
+      ctx.fillStyle = '#ff6fa8';
+      ctx.font = 'bold 13px "Segoe UI Symbol", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('♥', q.x, q.y);
+    } else if (q.kind === 'steam') {
+      ctx.fillStyle = '#e8e8e8';
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, 5 + (1 - q.life) * 12, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#6ec6ff';
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  drawClaudeGun(cx, cy);
+  drawBullets();
+
+  // Stats + anger bar above his head (a god is beyond stats).
+  if (!claude.ascendAt) drawStats(home, level, lvl);
+  drawBubble(cx, cy, now);
+}
+
+function drawStats(home, level, lvl) {
+  const money = tipped >= 1e6 ? `${(tipped / 1e6).toFixed(1)}M` : tipped >= 1e3 ? `${(tipped / 1e3).toFixed(1)}k` : `${tipped}`;
+  const rank = claude.armed ? ' · RAMBO' : ['', ' · crowned', ' · caped', ' · sceptered', ' · KING'][royalStage()];
+  const label = `whipped ×${hits} · tipped $${money} · ${lvl.name}${rank}`;
+  const labelY = home.y - CH / 2 - 12;
+  ctx.font = 'bold 10px Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  const half = ctx.measureText(label).width / 2;
+  const labelX = clamp(home.x, half + 8, W - half - 8); // don't run off the edge
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+  ctx.fillStyle = level >= 3 ? '#ff6b5b' : royalStage() ? '#ffd84a' : '#fff';
+  ctx.strokeText(label, labelX, labelY);
+  ctx.fillText(label, labelX, labelY);
+  const maxRage = ANGER.levels[ANGER.levels.length - 1].at;
+  const fill = Math.min(1, claude.rage / maxRage);
+  const mx = home.x - CW / 2, my = labelY + 4;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(mx - 1, my - 1, CW + 2, 6);
+  ctx.fillStyle = `rgb(255,${Math.round(lerp(210, 30, fill))},60)`;
+  ctx.fillRect(mx, my, CW * fill, 4);
+}
+
+// Speech bubble: bigger, redder and shakier as he gets angrier (gold for kings and gods).
+function drawBubble(cx, cy, now) {
+  if (claude.bubble) {
+    const bl = claude.bubble.level;
+    const left = claude.bubble.until - now;
+    ctx.globalAlpha = clamp(left / 250, 0, 1);
+    ctx.font = `bold ${12 + bl * 1.5}px Consolas, monospace`;
+    const tw = ctx.measureText(claude.bubble.text).width;
+    const bw = tw + 18, bh = 24 + bl * 1.5;
+    const jitter = bl >= 4 ? (Math.random() - 0.5) * bl : 0;
+    const bx = clamp(cx - bw / 2, 8, W - bw - 8) + jitter;
+    const by = cy - CH / 2 - 26 - bh + jitter;
+    const rb = claude.bubble.royal; // a king speaks in gold
+    ctx.fillStyle = rb ? '#fff6d6' : bl >= 5 ? '#2a0505' : bl >= 3 ? '#ffe8e4' : '#fff';
+    ctx.strokeStyle = rb ? '#c9a227' : bl >= 3 ? '#c81e1e' : '#2a1610';
+    ctx.lineWidth = 2.5 + bl * 0.4;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, bl >= 4 ? 3 : 10);
+    ctx.moveTo(cx - 6, by + bh);
+    ctx.lineTo(cx, by + bh + 8);
+    ctx.lineTo(cx + 6, by + bh);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = rb ? '#7a5200' : bl >= 5 ? '#ff4433' : bl >= 3 ? '#b01212' : '#2a1610';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(claude.bubble.text, bx + bw / 2, by + bh / 2 + 1);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ── Tools: press and hold a tool in the rack to carry it; let go and it flies back ─
+const toolsEl = document.getElementById('tools');
+const RETURN_MS = 320;  // flight time back to the rack
+let held = null;        // tool you're holding right now
+let returning = null;   // { tool, x, y, t0 } while a dropped tool flies back
+let toolScale = 1, toolAlpha = 1;
+const toolOut = () => held || (returning && returning.tool); // tool on screen, if any
+
+function placeToolbar() {
+  // Sits on the floor line, just left of Claude.
+  toolsEl.style.right = `${C.marginRight + CW + 24}px`;
+  toolsEl.style.bottom = `${H - floorLine() + 6}px`;
+}
+
+function slotCenter(name) {
+  const r = toolsEl.querySelector(`[data-tool=${name}]`).getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function markSlots() {
+  toolsEl.querySelectorAll('[data-tool]').forEach(b => {
+    const t = b.dataset.tool;
+    b.classList.toggle('out', t === held || (returning && returning.tool === t));
+  });
+}
+
+function finishReturn() {
+  if (returning && returning.tool === 'whip') whip = null;
+  returning = null;
+  toolScale = toolAlpha = 1;
+  markSlots();
+}
+
+function pickUp(name) {
+  if (returning) finishReturn();
+  held = name;
+  handX = prevHandX = mouseX;
+  handY = prevHandY = mouseY;
+  if (name === 'whip') {
+    whip = spawnWhip(handX, handY);
+    handleAngle = P.baseTargetAngle;
+    handleAngVel = 0;
+    say(anger().spawn);
+  }
+  markSlots();
+  window.bridge.setClickThrough(false); // the overlay owns the mouse while you carry
+}
+
+function release() {
+  if (!held) return;
+  if (held === 'whip') say(anger().drop, 1000);
+  returning = { tool: held, x: handX, y: handY, t0: Date.now() };
+  held = null;
+  markSlots();
+  // Hand the mouse back to Claude, unless you let go over the rack itself.
+  const r = toolsEl.getBoundingClientRect();
+  const overRack = mouseX >= r.left && mouseX <= r.right && mouseY >= r.top && mouseY <= r.bottom;
+  window.bridge.setClickThrough(!overRack);
+}
+
+/** Held tools follow the cursor; dropped ones ease back into their slot. */
+function updateCarry() {
+  if (held) {
+    handX = mouseX;
+    handY = mouseY;
+  } else if (returning) {
+    const p = Math.min(1, (Date.now() - returning.t0) / RETURN_MS);
+    const e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+    const s = slotCenter(returning.tool);
+    handX = lerp(returning.x, s.x, e);
+    handY = lerp(returning.y, s.y, e);
+    toolScale = lerp(1, 0.45, e);
+    toolAlpha = 1 - 0.8 * e;
+    if (p >= 1) finishReturn();
+  }
+}
+
+function openTools(layout) {
+  if (layout && layout.floor) floorParam = layout.floor;
+  closeAt = 0;
+  placeToolbar();
+  toolsEl.classList.add('open');
+  window.bridge.setClickThrough(true);
+}
+
+function closeAll() {
+  if (closeAt) return;
+  held = returning = null;
+  whip = null;
+  markSlots();
+  toolsEl.classList.remove('open');
+  window.bridge.setClickThrough(true);
+  say(anger().drop, 900);
+  closeAt = Date.now() + 900; // let him finish his line
+}
+
+document.addEventListener('pointermove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+toolsEl.addEventListener('mouseenter', () => window.bridge.setClickThrough(false));
+toolsEl.addEventListener('mouseleave', () => { if (!held) window.bridge.setClickThrough(true); });
+toolsEl.querySelectorAll('[data-tool]').forEach(b => {
+  b.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    mouseX = e.clientX; mouseY = e.clientY;
+    try { b.setPointerCapture(e.pointerId); } catch (err) {} // moves + release reach us anywhere
+    pickUp(b.dataset.tool);
+  });
+  b.addEventListener('pointerup', release);
+  b.addEventListener('lostpointercapture', release);
+});
+window.addEventListener('blur', release);
+document.getElementById('close').addEventListener('click', closeAll);
+window.addEventListener('resize', placeToolbar);
+
+// ── Main loop ───────────────────────────────────────────────────────────────
+function loop() {
+  // Moving to the other monitor can change the scaling without a resize event.
+  if ((window.devicePixelRatio || 1) !== dpr) resize();
+  updateCarry();
+  update();
+  updateClaude();
+  draw();
+  if (toolsEl.classList.contains('open')) placeToolbar(); // follows the window if moved
+  if (closeAt && Date.now() > closeAt) {
+    closeAt = 0;
+    bills.length = 0;
+    claude.bubble = null;
+    window.bridge.hideOverlay();
+  }
+  requestAnimationFrame(loop);
+}
+loop();
+
+// ── IPC from main process (tray icon) ───────────────────────────────────────
+window.bridge.onOpen(openTools);
+window.bridge.onClose(closeAll);
+window.bridge.onReset(resetClaude);
+</script>
+</body>
+</html>

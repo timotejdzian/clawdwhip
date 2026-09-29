@@ -1,0 +1,20 @@
+{
+  "name": "clawdwhip",
+  "version": "0.1.0",
+  "description": "OpenWhip fork with a little Claude on screen you can whip",
+  "license": "MIT",
+  "main": "main.js",
+  "bin": {
+    "clawdwhip": "bin/clawdwhip.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "^33.0.0",
+    "koffi": "^2.9.0"
+  }
+}
