@@ -1,5 +1,7 @@
 # clawdwhip
 
+![clawdwhip demo: whipping Claude until he goes Rambo, then paying him until he's king](docs/demo.gif)
+
 A fork of [OpenWhip](https://github.com/GitFrog1111/OpenWhip) (MIT): a little pixel Claude
 standing on the bottom edge of the Claude desktop app's window. Whip him, pay him, crown
 him. Windows only.
