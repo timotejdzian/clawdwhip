@@ -411,6 +411,7 @@ function draw() {
   ctx.globalAlpha = toolAlpha; // fades while flying back to the rack
   if (whip) drawWhip();
   if (toolOut() === 'money') drawMoneyGun();
+  if (held === 'ak') drawTumbler(heldAK());
   ctx.restore();
 
   if (claude.ascendAt) {
@@ -1336,10 +1337,10 @@ function drawBullets() {
   }
 }
 
-// ── Take his AK: click it while he's Rambo and you toss it away; he empties his
+// ── Take his AK: grab it while he's Rambo and fling it away; he empties his
 // inventory at you instead, then calms right down ───────────────────────────
 let gunHover = false;
-const TAKE_LINES = ['HEY! MY GUN!', 'fine. plan B.', 'I have OTHER things.', "you think that's all I've got?"];
+const TAKE_LINES = ['fine. plan B.', 'I have OTHER things.', "you think that's all I've got?"];
 
 /** Is the cursor on his AK (within a few px of the barrel line)? */
 function overHisGun() {
@@ -1361,19 +1362,32 @@ function updateGunHover() {
   if (!rackHover && !held) window.bridge.setClickThrough(!over);
 }
 
-function takeHisGun() {
-  const h = claudeHome();
-  const pv = gunPivot(h.x + claude.ox, h.y + claude.oy);
-  particles.push({ kind: 'ak', tumble: true, x: pv.x, y: pv.y, vx: -7 - Math.random() * 3, vy: -9,
-                   rot: claude.gunAngle, life: 1 }); // yanked off him and tossed away
-  Object.assign(claude, { armed: false, maxHits: 0, godHits: 0, inventory: [...INVENTORY], nextThrow: Date.now() + 900 });
+function grabHisGun(e) {
+  Object.assign(claude, { armed: false, maxHits: 0, godHits: 0 });
   bullets.length = 0;
-  say(pick(TAKE_LINES), 1600);
   save();
-  updateGunHover(); // no gun left to hover: hand clicks back to Claude
+  say('HEY! MY GUN!', 1600);
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {} // the release reaches us anywhere
+  pickUp('ak');
+  updateGunHover(); // nothing left to hover
 }
 
-canvas.addEventListener('pointerdown', e => { if (e.button === 0 && overHisGun()) takeHisGun(); });
+/** His AK in your hand, held by the grip, barrel pointing away from him. */
+function heldAK() {
+  const u = C.pixel * AK_SIZE, rot = clamp(carryVX * 0.03, -0.7, 0.7); // swings as you move it
+  return { kind: 'ak', flip: true, rot, x: handX - Math.cos(rot) * 2 * u, y: handY - Math.sin(rot) * 2 * u };
+}
+
+/** You let go of it: it flies off the way you flung it, and he reaches for his inventory. */
+function throwHisGun() {
+  particles.push({ ...heldAK(), tumble: true, vx: clamp(carryVX, -35, 35), vy: clamp(carryVY, -35, 35), life: 1 });
+  Object.assign(claude, { inventory: [...INVENTORY], nextThrow: Date.now() + 900 });
+  say(pick(TAKE_LINES), 1600);
+}
+
+canvas.addEventListener('pointerdown', e => { if (e.button === 0 && overHisGun()) grabHisGun(e); });
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('lostpointercapture', release);
 
 // ── His inventory: what he throws at your cursor once the AK is gone ────────
 const INVENTORY = ['cake', 'racket', 'cake', 'racket', 'cake'];
@@ -1433,6 +1447,16 @@ const DRAW_ITEM = {
   ak: () => { ctx.translate(-2 * C.pixel * AK_SIZE, 0); drawAK(C.pixel * AK_SIZE); },
   crown: () => drawCrownShape(0, 0, 6 * C.pixel),
 };
+
+/** Draw DRAW_ITEM[q.kind] at q.x, q.y, turned by q.rot (and mirrored if q.flip). */
+function drawTumbler(q) {
+  ctx.save();
+  ctx.translate(q.x, q.y);
+  ctx.rotate(q.rot);
+  if (q.flip) ctx.scale(-1, 1);
+  DRAW_ITEM[q.kind]();
+  ctx.restore();
+}
 
 /** Where he holds up the next item, in his AK arm. */
 function throwHand(cx, cy) {
@@ -1522,13 +1546,7 @@ function drawThrown() {
   }
   if (splats.length && now - splats[0].t > THROW.splatMs) splats.shift();
   ctx.globalAlpha = 1;
-  for (const t of thrown) {
-    ctx.save();
-    ctx.translate(t.x, t.y);
-    ctx.rotate(t.rot);
-    DRAW_ITEM[t.kind]();
-    ctx.restore();
-  }
+  thrown.forEach(drawTumbler);
 }
 
 function resetClaude() {
@@ -1847,11 +1865,7 @@ function drawClaude() {
       ctx.arc(q.x, q.y, 4, 0, Math.PI * 2);
       ctx.fill();
     } else if (q.tumble) {
-      ctx.save();
-      ctx.translate(q.x, q.y);
-      ctx.rotate(q.rot);
-      DRAW_ITEM[q.kind]();
-      ctx.restore();
+      drawTumbler(q);
     } else if (q.kind === 'sparkle') {
       // Four-point gold twinkle.
       const s = 2 + q.life * 3;
@@ -1885,12 +1899,7 @@ function drawClaude() {
   drawClaudeGun(cx, cy);
   // The next thing in his inventory, held up ready to throw.
   if (claude.inventory && claude.inventory.length && !claude.armed && now - claude.thrownAt > 300) {
-    const hand = throwHand(cx, cy);
-    ctx.save();
-    ctx.translate(hand.x, hand.y);
-    ctx.rotate(-0.4);
-    DRAW_ITEM[claude.inventory[0]]();
-    ctx.restore();
+    drawTumbler({ kind: claude.inventory[0], ...throwHand(cx, cy), rot: -0.4 });
   }
   drawBullets();
   drawThrown();
@@ -1958,8 +1967,9 @@ function drawBubble(cx, cy, now) {
 // ── Tools: press and hold a tool in the rack to carry it; let go and it flies back ─
 const toolsEl = document.getElementById('tools');
 const RETURN_MS = 320;  // flight time back to the rack
-let held = null;        // tool you're holding right now
+let held = null;        // tool you're holding right now ('ak' = his, grabbed off him)
 let returning = null;   // { tool, x, y, t0 } while a dropped tool flies back
+let carryVX = 0, carryVY = 0; // hand speed (px/frame, smoothed), for flinging the AK
 let toolScale = 1, toolAlpha = 1;
 const toolOut = () => held || (returning && returning.tool); // tool on screen, if any
 
@@ -1993,6 +2003,7 @@ function pickUp(name) {
   held = name;
   handX = prevHandX = mouseX;
   handY = prevHandY = mouseY;
+  carryVX = carryVY = 0;
   if (name === 'whip') {
     whip = spawnWhip(handX, handY);
     handleAngle = P.baseTargetAngle;
@@ -2006,7 +2017,8 @@ function pickUp(name) {
 function release() {
   if (!held) return;
   if (held === 'whip') say(anger().drop, 1000);
-  returning = { tool: held, x: handX, y: handY, t0: Date.now() };
+  if (held === 'ak') throwHisGun(); // his, so no slot to fly back to
+  else returning = { tool: held, x: handX, y: handY, t0: Date.now() };
   held = null;
   markSlots();
   // Hand the mouse back to Claude, unless you let go over the rack itself.
@@ -2018,6 +2030,8 @@ function release() {
 /** Held tools follow the cursor; dropped ones ease back into their slot. */
 function updateCarry() {
   if (held) {
+    carryVX = lerp(carryVX, mouseX - handX, 0.5);
+    carryVY = lerp(carryVY, mouseY - handY, 0.5);
     handX = mouseX;
     handY = mouseY;
   } else if (returning) {

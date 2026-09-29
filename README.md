@@ -38,7 +38,8 @@ OpenWhip's Electron and koffi.)
 - **His AK-47:** whip him 10 more times once he's UNHINGED and he goes Rambo (headband,
   ammo belt, camo). While you carry the whip he fires bursts at your hand; a hit knocks
   the whip back to the rack, a miss leaves a bullet hole. Keep moving. Calm him below
-  UNHINGED and he puts it away, or **click his AK** to yank it off him and toss it away.
+  UNHINGED and he puts it away, or **grab his AK** (press on it) and fling it away: it
+  flies off the way you throw it.
 - **His inventory:** with the AK gone he throws everything he's got at your cursor: cakes
   and tennis rackets. A cake that hits splats on your screen, a racket bonks off, and
   either knocks whatever you're holding back to the rack. Once he's out: "oh... I am
