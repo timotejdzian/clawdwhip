@@ -414,10 +414,13 @@ function draw() {
   ctx.restore();
 
   if (claude.ascendAt) {
-    const p = (Date.now() - claude.ascendAt) / ASCEND_MS;
-    ctx.fillStyle = `rgba(255, 236, 170, ${0.25 * p})`;
+    const t = Date.now() - claude.ascendAt, R = ASCEND_MS;
+    ctx.fillStyle = `rgba(255, 236, 170, ${0.25 * Math.min(1, t / R)})`;
     ctx.fillRect(0, 0, W, H);
-    const flash = p < 0.72 ? 0 : p < 0.82 ? (p - 0.72) / 0.1 : p < 0.92 ? 1 : (1 - p) / 0.08;
+    const flash = t < 0.72 * R ? 0
+      : t < 0.82 * R ? (t - 0.72 * R) / (0.1 * R)             // fade in
+      : t < 0.92 * R + TEXT_HOLD_MS ? 1                        // hold the text
+      : (R + TEXT_HOLD_MS - t) / (0.08 * R);                   // fade out
     if (flash > 0) {
       ctx.fillStyle = `rgba(255, 255, 255, ${flash})`;
       ctx.fillRect(0, 0, W, H);
@@ -1307,7 +1310,8 @@ function resetClaude() {
 // ── Ascension: whip Rambo ASCEND_AFTER more times and he leaves this plane, closing the
 // Claude app on his way out (a normal close request, like clicking its ✕).
 const ASCEND_AFTER = 5;
-const ASCEND_MS = 5200;
+const ASCEND_MS = 5200;   // the rise, up to the white flash
+const TEXT_HOLD_MS = 5000; // extra time the "CLAUDE HAS ASCENDED / fuck you" screen stays up
 
 function ascend(now) {
   claude.ascendAt = now;
@@ -1332,7 +1336,7 @@ function updateAscension(now) {
     claude.closedClaude = true;
     window.bridge.closeClaude();
   }
-  if (p >= 1) {
+  if (now - claude.ascendAt >= ASCEND_MS + TEXT_HOLD_MS) {
     // Back to a calm mortal for next time, so it can't retrigger on launch.
     Object.assign(claude, { rage: 0, armed: false, maxHits: 0, godHits: 0, ascendAt: 0, closedClaude: false, oy: 0 });
     save();
