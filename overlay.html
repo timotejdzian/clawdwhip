@@ -6,7 +6,7 @@
   html, body { overflow: hidden; background: transparent; width: 100%; height: 100%; }
   canvas { display: block; }
 
-  /* Tool rack: whip | money gun | close. Press and hold a tool to carry it. */
+  /* Tool rack: whip | money gun | spray bottle | feather | close. Press and hold a tool to carry it. */
   #tools {
     position: fixed; display: none; align-items: center; gap: 4px; padding: 4px;
     background: rgba(24, 22, 30, 0.92); border: 1px solid rgba(255, 255, 255, 0.14);
@@ -46,6 +46,20 @@
       <rect x="2" y="4" width="24" height="11" fill="#da291c" stroke="#fff" stroke-width="1"/>
       <text x="14" y="12.3" font-size="6.6" font-weight="900" font-style="italic" fill="#fff"
             font-family="Futura, 'Arial Black', sans-serif" text-anchor="middle">Supreme</text>
+    </svg>
+  </button>
+  <button data-tool="spray" title="Spray bottle: hold to spray (calms him, he hates it)">
+    <svg width="26" height="28" viewBox="0 0 26 28" stroke-linejoin="round">
+      <path d="M6 3 H17 L22 5 V8 H17 L15 10 H8 Z" fill="#eee" stroke="#fff" stroke-width="0.8"/>
+      <path d="M13 10 L16 15" stroke="#eee" stroke-width="2" stroke-linecap="round"/>
+      <rect x="5" y="10" width="10" height="16" rx="3" fill="rgba(120,190,255,0.75)" stroke="#fff" stroke-width="1"/>
+      <path d="M23 6 h2 M23 3.5 l1.6 -1 M23 8.5 l1.6 1" stroke="#9fd4ff" stroke-width="1.2" stroke-linecap="round"/>
+    </svg>
+  </button>
+  <button data-tool="feather" title="Feather: hold and brush it over him to tickle">
+    <svg width="26" height="26" viewBox="0 0 26 26" stroke-linecap="round">
+      <path d="M3 24 C 9 16, 15 9, 23 3 C 22 12, 15 19, 6 21 Z" fill="#fde7ef" stroke="#fff" stroke-width="1"/>
+      <path d="M3 24 C 10 16, 16 9, 23 3" fill="none" stroke="#c46b8a" stroke-width="1.2"/>
     </svg>
   </button>
   <span class="sep"></span>
@@ -131,6 +145,7 @@ resize();
 window.addEventListener('resize', resize);
 
 let mouseX = 0, mouseY = 0;
+let mouseVX = 0, mouseVY = 0, lastMouseX = 0, lastMouseY = 0;
 let prevHandX = 0, prevHandY = 0;
 // Where the held tool is: the cursor while you hold it, flying back to its slot after.
 let handX = 0, handY = 0;
@@ -411,7 +426,9 @@ function draw() {
   ctx.globalAlpha = toolAlpha; // fades while flying back to the rack
   if (whip) drawWhip();
   if (toolOut() === 'money') drawMoneyGun();
-  if (held === 'ak') drawTumbler(heldAK());
+  if (toolOut() === 'spray') drawSprayBottle();
+  if (toolOut() === 'feather') drawFeather();
+  if (held && !RACK.includes(held)) drawTumbler(heldThing(held)); // his AK, or something you caught
   ctx.restore();
 
   if (claude.ascendAt) {
@@ -436,6 +453,7 @@ function draw() {
       ctx.globalAlpha = 1;
     }
   }
+  drawToast();
 }
 
 function drawWhip() {
@@ -637,9 +655,11 @@ const claude = {
   bubble: null, // { text, until, level }
   rage: 0, lastTick: Date.now(), nextStomp: 0, nextSteam: 0,
   happy: 0, lastPaidLine: 0, nextHop: 0,
-  maxHits: 0, armed: false, // whips taken at max rage, and whether he's pulled his gun
+  armed: false, // whether he's pulled his gun
   godHits: 0, ascendAt: 0, closedClaude: false, // whips taken as Rambo; ascension in progress
   royal: 0, nextSparkle: 0, // bills received while fully calm (crown, cape, ...)
+  god: false, tribute: 0,   // back from ascension as a smug god, and bills paid toward his descent
+  walkX: 0,                 // how far he has wandered left of his spot (idle life)
 };
 const particles = [];
 const bills = [];
@@ -647,6 +667,7 @@ let lastBillTime = 0;
 
 let hits = 0;
 let tipped = 0; // total $ sprayed onto him
+let unlocked = new Set(); // achievement ids
 // Everything that survives a restart lives in one slot. Anger keeps cooling while the
 // app is closed; a cooled-off armed Claude drops the gun on the first frame.
 try {
@@ -654,7 +675,9 @@ try {
   if (saved) {
     ({ hits, tipped } = saved);
     claude.rage = Math.max(0, saved.rage - (Date.now() - saved.at) / 1000 * ANGER.coolPerSec);
-    Object.assign(claude, { maxHits: saved.maxHits, armed: saved.armed, royal: saved.royal, godHits: saved.godHits || 0 });
+    Object.assign(claude, { armed: saved.armed, royal: saved.royal, godHits: saved.godHits || 0,
+                            god: !!saved.god, tribute: saved.tribute || 0 });
+    unlocked = new Set(saved.achievements || []);
   }
 } catch (e) {}
 
@@ -662,7 +685,8 @@ function save() {
   try {
     localStorage.setItem('clawdwhip', JSON.stringify({
       hits, tipped, rage: claude.rage, at: Date.now(),
-      maxHits: claude.maxHits, armed: claude.armed, royal: claude.royal, godHits: claude.godHits,
+      armed: claude.armed, royal: claude.royal, godHits: claude.godHits,
+      god: claude.god, tribute: claude.tribute, achievements: [...unlocked],
     }));
   } catch (e) {}
 }
@@ -676,12 +700,48 @@ const anger = () => ANGER.levels[angerIndex()];
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 
 function claudeHome() {
-  return { x: W - C.marginRight - CW / 2, y: floorLine() - CH / 2 - 6 };
+  return { x: W - C.marginRight - CW / 2 + claude.walkX, y: floorLine() - CH / 2 - 6 };
 }
 
+/** Is (x, y) on Claude (his body box, grown by pad on each side)? */
+function onClaude(x, y, pad = 0) {
+  const h = claudeHome();
+  return Math.abs(x - h.x - claude.ox) < CW / 2 + pad && Math.abs(y - h.y - claude.oy) < CH / 2 + pad;
+}
+
+// ── His voice: bubbles type out letter by letter, with a beep every other letter ─
+const SPEECH = {
+  charMs: 28,                               // time per letter
+  pitch:  [620, 560, 480, 360, 260, 170],   // Hz per anger level: squeaky when calm, low when UNHINGED
+  volume: 0.035,
+};
+
 function say(text, ms = 1600) {
-  claude.bubble = { text, until: Date.now() + ms, level: angerIndex(),
-                    royal: !!claude.ascendAt || (royalStage() > 0 && angerIndex() < 3) }; // gold bubble
+  const now = Date.now();
+  claude.bubble = { text, start: now, until: now + ms + text.length * SPEECH.charMs, voiced: 0, level: angerIndex(),
+                    royal: !!claude.ascendAt || claude.god || (royalStage() > 0 && angerIndex() < 3) }; // gold bubble
+}
+
+function playBlip(b) {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime, o = a.createOscillator(), g = a.createGain();
+  o.type = b.royal ? 'sine' : b.level >= 4 ? 'square' : b.level >= 2 ? 'triangle' : 'sine';
+  o.frequency.value = (b.royal ? 720 : SPEECH.pitch[b.level]) * (0.92 + Math.random() * 0.16);
+  g.gain.setValueAtTime(SPEECH.volume * (o.type === 'square' ? 0.45 : 1), t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+  o.connect(g).connect(a.destination);
+  o.start(t); o.stop(t + 0.06);
+}
+
+/** Beep for the newest letter of his bubble (at most one beep per frame). */
+function updateVoice(now) {
+  const b = claude.bubble;
+  if (!b) return;
+  const shown = Math.min(b.text.length, Math.floor((now - b.start) / SPEECH.charMs) + 1);
+  if (shown > b.voiced) {
+    if (shown % 2 && /\S/.test(b.text[shown - 1])) playBlip(b);
+    b.voiced = shown;
+  }
 }
 
 function puffSteam(n) {
@@ -702,11 +762,15 @@ function hitClaude(x, y, vx, vy) {
   if (claude.ascendAt) return;
   if (now - claude.lastHit < C.hitCooldownMs) return;
   claude.lastHit = now;
+  if (claude.god) return smite(handX, handY, 150, pick(GOD.whipLines)); // gods don't get whipped
 
   hits++;
+  unlock('first_blood');
+  const wasAsleep = asleep();
+  poke();
 
   const before = angerIndex();
-  claude.rage += ANGER.perHit;
+  claude.rage += ANGER.perHit * (wasAsleep ? 2 : 1); // nobody likes being woken up like that
   save();
   const level = angerIndex();
 
@@ -718,6 +782,11 @@ function hitClaude(x, y, vx, vy) {
   claude.hurt = 1;
   claude.squash = 1;
   say(pick(anger().lines), 1600 + level * 150);
+  if (wasAsleep) {
+    claude.vy -= 12; // jolts awake
+    say(pick(IDLE.wokeLines), 2000);
+    unlock('rude');
+  }
   if (level > before && level >= 3) puffSteam(8);
   // Whipping a king knocks him down the ranks; losing the crown sends it flying.
   if (claude.royal > 0) {
@@ -732,14 +801,14 @@ function hitClaude(x, y, vx, vy) {
     if (royalStage() < stageBefore) say(pick(ROYALTY.lostLines), 1800);
   }
 
-  // Whips while he's already at max rage count toward him snapping.
+  // A full anger bar (UNHINGED) and he pulls the AK, unless you took it and he's on his junk.
   const maxLevel = ANGER.levels.length - 1;
-  if (before === maxLevel) claude.maxHits++;
   if (claude.armed && before === maxLevel && ++claude.godHits >= ASCEND_AFTER) return ascend(now);
-  if (!claude.armed && claude.maxHits >= ARM_AFTER) {
+  if (!claude.armed && !claude.inventory && level === maxLevel) {
     // He snaps and pulls out a gun, until money or time calms him below max rage.
     claude.armed = true;
     save();
+    unlock('rambo');
     claude.gunDrawnAt = now;
     claude.nextShot = now + 1400;
     say("THAT'S IT.", 2400);
@@ -854,6 +923,26 @@ function playChaChing() {
   });
 }
 
+let longNoise = null;
+/** A burst of filtered noise (munches, sprays, purrs, thunder); returns its gain node. */
+function playNoise(dur, filterType, freq, gain, delay = 0) {
+  const a = audio(); if (!a) return null;
+  if (!longNoise) {
+    longNoise = a.createBuffer(1, a.sampleRate * 1.5, a.sampleRate);
+    const d = longNoise.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  const t = a.currentTime + delay;
+  const src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+  src.buffer = longNoise;
+  f.type = filterType; f.frequency.value = freq;
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(f).connect(g).connect(a.destination);
+  src.start(t); src.stop(t + dur);
+  return g;
+}
+
 /** Launch velocity that carries something from (x, y) to (tx, ty) despite gravity. */
 function lob(x, y, tx, ty, speed, gravity) {
   const dx = tx - x, dy = ty - y;
@@ -888,13 +977,17 @@ function fireBill() {
 }
 
 function payClaude(x, y) {
+  tipped += MONEY.billValue;
+  if (tipped >= 100000) unlock('big_spender');
+  poke();
+  if (claude.god) return payTribute(x, y);
   const before = angerIndex();
   // Already fully calm? Then the money goes to his royal ambitions.
   const stageBefore = royalStage();
   if (claude.rage <= 0) claude.royal++;
   const stageAfter = royalStage();
+  if (stageAfter >= 4) unlock('king');
   claude.rage = Math.max(0, claude.rage - MONEY.calmPerBill);
-  tipped += MONEY.billValue;
   save();
   const after = angerIndex();
 
@@ -1032,10 +1125,10 @@ const GUN_SLOT = { x: 76, y: -30 };
 
 const gunFlip = angle => (Math.cos(angle) < 0 ? -1 : 1); // keep it upright when aiming left
 
-/** Screen position of the bill slot, where bills leave the gun. */
-function gunMuzzle(aim) {
+/** Screen position of the bill slot, where bills leave the gun (or the spray bottle's nozzle). */
+function gunMuzzle(aim, slot = GUN_SLOT, scale = GUN_SCALE) {
   const angle = aim.angle, flip = gunFlip(angle);
-  const lx = GUN_SLOT.x * GUN_SCALE, ly = GUN_SLOT.y * GUN_SCALE * flip;
+  const lx = slot.x * scale, ly = slot.y * scale * flip;
   return {
     x: handX + lx * Math.cos(angle) - ly * Math.sin(angle),
     y: handY + lx * Math.sin(angle) + ly * Math.cos(angle),
@@ -1124,8 +1217,7 @@ function drawMoneyGun() {
   ctx.restore();
 }
 
-// ── Claude's gun: ARM_AFTER whips at max rage and he shoots at the hand holding the whip ─
-const ARM_AFTER = 10;
+// ── Claude's gun: a full anger bar and he shoots at the hand holding the whip ─
 const AK_SIZE = 0.9; // AK-47 scale (in Claude pixels per gun unit)
 const GUNFIGHT = {
   shotEveryMs: [900, 1800], // random pause between bursts
@@ -1200,10 +1292,10 @@ function shoot(now, pv) {
 
 function updateGunfight(now) {
   // Calmed below max rage (money, or time): the gun goes away and the count restarts.
-  if (angerIndex() < ANGER.levels.length - 1 && (claude.armed || claude.maxHits)) {
-    if (claude.armed) say('fine. putting it away.', 1800);
+  if (angerIndex() < ANGER.levels.length - 1 && claude.armed) {
+    say('fine. putting it away.', 1800);
     claude.armed = false;
-    claude.maxHits = claude.godHits = 0;
+    claude.godHits = 0;
     bullets.length = 0;
     save();
   }
@@ -1339,7 +1431,6 @@ function drawBullets() {
 
 // ── Take his AK: grab it while he's Rambo and fling it away; he empties his
 // inventory at you instead, then calms right down ───────────────────────────
-let gunHover = false;
 const TAKE_LINES = ['fine. plan B.', 'I have OTHER things.', "you think that's all I've got?"];
 
 /** Is the cursor on his AK (within a few px of the barrel line)? */
@@ -1353,43 +1444,60 @@ function overHisGun() {
   return Math.hypot(pv.x + dx * along - mouseX, pv.y + dy * along - mouseY) < 16;
 }
 
-/** Catch clicks only while hovering the gun; everywhere else they go to Claude. */
-function updateGunHover() {
-  const over = overHisGun();
-  if (over === gunHover) return;
-  gunHover = over;
-  canvas.style.cursor = over ? 'grab' : '';
-  if (!rackHover && !held) window.bridge.setClickThrough(!over);
-}
-
-function grabHisGun(e) {
-  Object.assign(claude, { armed: false, maxHits: 0, godHits: 0 });
+function grabHisGun() {
+  Object.assign(claude, { armed: false, godHits: 0 });
   bullets.length = 0;
   save();
   say('HEY! MY GUN!', 1600);
-  try { canvas.setPointerCapture(e.pointerId); } catch (err) {} // the release reaches us anywhere
+  unlock('disarmed');
   pickUp('ak');
-  updateGunHover(); // nothing left to hover
 }
 
-/** His AK in your hand, held by the grip, barrel pointing away from him. */
-function heldAK() {
-  const u = C.pixel * AK_SIZE, rot = clamp(carryVX * 0.03, -0.7, 0.7); // swings as you move it
+/** Something that isn't from the rack, in your hand: his AK by the grip, or a caught item. */
+function heldThing(kind) {
+  const rot = clamp(mouseVX * 0.03, -0.7, 0.7); // swings as you move it
+  if (kind !== 'ak') return { kind, rot, x: handX, y: handY };
+  const u = C.pixel * AK_SIZE; // barrel pointing away from him
   return { kind: 'ak', flip: true, rot, x: handX - Math.cos(rot) * 2 * u, y: handY - Math.sin(rot) * 2 * u };
 }
 
-/** You let go of it: it flies off the way you flung it, and he reaches for his inventory. */
-function throwHisGun() {
-  particles.push({ ...heldAK(), tumble: true, vx: clamp(carryVX, -35, 35), vy: clamp(carryVY, -35, 35), life: 1 });
-  const [lo, hi] = THROW.itemCount;
-  const inventory = Array.from({ length: lo + Math.floor(Math.random() * (hi - lo + 1)) }, () => pick(ITEMS));
-  Object.assign(claude, { inventory, nextThrow: Date.now() + 900 });
-  say(pick(TAKE_LINES), 1600);
+/** You let go of his AK or one of his things: fed to him if it's food over his mouth, else flung. */
+function letGo(kind) {
+  if (FOOD[kind] && onClaude(handX, handY)) return feed(kind);
+  const vx = clamp(mouseVX, -35, 35), vy = clamp(mouseVY, -35, 35);
+  flung.push({ ...heldThing(kind), vx, vy, vrot: clamp(vx * 0.03, -0.4, 0.4) });
+  if (kind === 'ak') {
+    // He reaches for his inventory.
+    const [lo, hi] = THROW.itemCount;
+    const inventory = Array.from({ length: lo + Math.floor(Math.random() * (hi - lo + 1)) }, () => pick(ITEMS));
+    Object.assign(claude, { inventory, nextThrow: Date.now() + 900 });
+    say(pick(TAKE_LINES), 1600);
+  }
 }
 
-canvas.addEventListener('pointerdown', e => { if (e.button === 0 && overHisGun()) grabHisGun(e); });
-canvas.addEventListener('pointerup', release);
-canvas.addEventListener('lostpointercapture', release);
+// ── Who gets the mouse: the overlay is click-through (clicks go to Claude underneath)
+// except over the rack, while you carry something, over his AK, and during his throwing fight.
+let clickThrough = null, rackHover = false;
+let bracing = false; // mouse held down during the fight: the next thing he throws lands in your hand
+
+const catchable = () => !held && !claude.ascendAt && !!(claude.inventory || thrown.length);
+
+function updateMouseCapture() {
+  const grab = overHisGun() || catchable();
+  canvas.style.cursor = grab ? (bracing ? 'grabbing' : 'grab') : '';
+  const through = !(held || rackHover || grab || bracing);
+  if (through !== clickThrough) window.bridge.setClickThrough(clickThrough = through);
+}
+
+canvas.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) {} // the release reaches us anywhere
+  if (overHisGun()) grabHisGun();
+  else if (catchable()) bracing = true;
+});
+for (const type of ['pointerup', 'lostpointercapture']) {
+  canvas.addEventListener(type, () => { bracing = false; release(); });
+}
 
 // ── His inventory: a random handful of junk he throws at your cursor once the AK is gone ─
 const THROW = {
@@ -1398,8 +1506,12 @@ const THROW = {
   speed:     12,          // px/frame toward your cursor
   gravity:   0.25,
   hitRadius: 28,          // this close to the cursor is a hit (knocks a held tool back to the rack)
+  catchRadius: 40,        // ...or a catch, if you're holding the mouse button down
   splatMs:   6000,        // cake on your screen fades after this long
+  faceCakeMs: 8000,       // cake you throw back stays on his face this long
 };
+// Catch his food and drop it on him to feed him: rage it removes (a whip adds 1).
+const FOOD = { cake: 5, pizza: 5, banana: 3, fish: 3, mug: 4 };
 const THROW_LINES = {
   cake:     ['EAT CAKE', 'happy birthday!!', 'the cake is a lie', 'have some CAKE'],
   racket:   ['FORE!', 'ACE!', '15-love', 'wrong sport. still hurts.'],
@@ -1412,7 +1524,12 @@ const THROW_LINES = {
 };
 const ITEMS = Object.keys(THROW_LINES); // everything he can have on him
 const ITEM_HIT_LINES = ['BULLSEYE', 'got you!', 'direct hit!', 'ha!'];
-const thrown = [];
+const CAUGHT_LINES = ['hey! give that back', 'nice catch...', 'no fair!', 'that was MINE'];
+const BONK_LINES = ['OW', 'hey!', 'rude!', 'my own stuff?!', 'you THREW that?'];
+const FACE_CAKE_LINES = ['...really?', "I can't see!", 'mmm... wait. HEY', 'CAKE IN MY EYES'];
+const FEED_LINES = ['om nom nom', 'mmm!', 'delicious.', 'I forgive you. a little.', 'more?'];
+const thrown = []; // his throws, flying at you
+const flung = [];  // yours: his AK or things you caught, flying wherever you threw them
 const splats = [];
 Object.assign(claude, { inventory: null, nextThrow: 0, thrownAt: 0 }); // inventory: items left, null = not throwing
 
@@ -1563,33 +1680,44 @@ function updateThrowing(now) {
     t.vy += THROW.gravity;
     t.x += t.vx; t.y += t.vy;
     t.rot += t.vrot;
-    if (Math.hypot(t.x - mouseX, t.y - mouseY) < THROW.hitRadius) {
+    const catching = bracing && !held;
+    if (Math.hypot(t.x - mouseX, t.y - mouseY) < (catching ? THROW.catchRadius : THROW.hitRadius)) {
       thrown.splice(i, 1);
-      if (t.kind === 'cake') {
-        // Splat, right on your screen; the frosting slowly slides down.
-        splats.push({ x: t.x, y: t.y, t: now,
-                      blobs: Array.from({ length: 8 }, () => [Math.random() * Math.PI * 2, 3 + Math.random() * 11, 5 + Math.random() * 5]),
-                      drips: [-8, -1, 7].map(dx => [dx + Math.random() * 3, 0.004 + Math.random() * 0.006]) });
-      } else {
-        particles.push({ kind: t.kind, tumble: true, x: t.x, y: t.y, vx: -t.vx * 0.4, vy: -6, rot: t.rot, life: 1 }); // bonk, bounces off
+      if (catching) {
+        pickUp(t.kind); // right into your hand; let go to throw it back (or drop food on him)
+        say(pick(CAUGHT_LINES), 1200);
+        continue;
       }
+      if (t.kind === 'cake') splats.push(makeSplat(t.x, t.y, now)); // right on your screen
+      else particles.push({ kind: t.kind, tumble: true, x: t.x, y: t.y, vx: -t.vx * 0.4, vy: -6, rot: t.rot, life: 1 }); // bonk
+      if (t.kind === 'fish') unlock('fish');
       playBonk();
-      release(); // whatever you're holding is knocked back to the rack
+      release(); // whatever you're holding is knocked out of your hand
       say(pick(ITEM_HIT_LINES), 1200);
     } else if (t.y > H + 60 || t.x < -80 || t.x > W + 80) {
       thrown.splice(i, 1);
     }
   }
+  for (let i = flung.length - 1; i >= 0; i--) {
+    const q = flung[i];
+    q.vy += THROW.gravity;
+    q.x += q.vx; q.y += q.vy;
+    q.rot += q.vrot;
+    if (Math.hypot(q.vx, q.vy) > 3 && !claude.ascendAt && onClaude(q.x, q.y, 8)) {
+      flung.splice(i, 1);
+      bonkClaude(q, now);
+    } else if (q.y > H + 80 || q.x < -150 || q.x > W + 150) {
+      flung.splice(i, 1);
+    }
+  }
+  if (claude.faceCake && now - claude.faceCake.t > THROW.faceCakeMs) claude.faceCake = null;
 
   if (!claude.inventory || claude.armed || claude.ascendAt || now < claude.nextThrow) return;
   const h = claudeHome();
   if (!claude.inventory.length) {
     // Nothing left to throw: he gives up and calms right down.
     Object.assign(claude, { inventory: null, rage: 0, happy: 1, hurt: 0 });
-    for (let i = 0; i < 6; i++) {
-      particles.push({ kind: 'heart', x: h.x + claude.ox + (Math.random() - 0.5) * CW, y: h.y + claude.oy - CH / 2,
-                       vx: (Math.random() - 0.5) * 1.5, vy: -1.5 - Math.random(), life: 1 });
-    }
+    hearts(6);
     say('oh... I am empty.', 2400);
     save();
     return;
@@ -1606,40 +1734,97 @@ function updateThrowing(now) {
   claude.nextThrow = now + lo + Math.random() * (hi - lo);
 }
 
+function hearts(n) {
+  const h = claudeHome();
+  for (let i = 0; i < n; i++) {
+    particles.push({ kind: 'heart', x: h.x + claude.ox + (Math.random() - 0.5) * CW, y: h.y + claude.oy - CH / 2,
+                     vx: (Math.random() - 0.5) * 1.5, vy: -1.5 - Math.random(), life: 1 });
+  }
+}
+
+/** Something you flung hit him: a cake sticks to his face, anything else bounces off. */
+function bonkClaude(q, now) {
+  poke();
+  claude.vx += clamp(q.vx * 0.3, -20, 20);
+  claude.vy -= 4;
+  claude.vrot += (q.vx >= 0 ? 1 : -1) * 0.15;
+  claude.hurt = 1;
+  claude.rage += ANGER.perHit;
+  save();
+  playBonk();
+  for (let i = 0; i < 8; i++) {
+    const a = Math.random() * Math.PI * 2, s = 2 + Math.random() * 5;
+    particles.push({ kind: 'spark', x: q.x, y: q.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1 });
+  }
+  if (q.kind === 'cake') {
+    claude.faceCake = makeSplat(7 * C.pixel, 2.8 * C.pixel, now, 0.9); // in his own coordinates
+    say(pick(FACE_CAKE_LINES), 1800);
+    unlock('caked');
+    return;
+  }
+  say(q.kind === 'ak' ? 'OW. MY OWN GUN.' : pick(BONK_LINES), 1500);
+  if (q.kind === 'ak') unlock('own_gun');
+  particles.push({ kind: q.kind, flip: q.flip, tumble: true, x: q.x, y: q.y, vx: -q.vx * 0.3, vy: -6, rot: q.rot, life: 1 });
+}
+
+/** You dropped some of his food on him: he eats it and calms down. */
+function feed(kind) {
+  poke();
+  claude.rage = Math.max(0, claude.rage - FOOD[kind]);
+  Object.assign(claude, { happy: 1, hurt: 0, squash: 0.4 });
+  [0, 0.13, 0.26].forEach(d => playNoise(0.08, 'lowpass', 900, 0.3, d)); // munch munch munch
+  const h = claudeHome();
+  for (let i = 0; i < 10; i++) {
+    particles.push({ kind: 'crumb', x: h.x + claude.ox + (Math.random() - 0.5) * CW * 0.5, y: h.y + claude.oy,
+                     vx: (Math.random() - 0.5) * 4, vy: -2 - Math.random() * 3, life: 1 });
+  }
+  hearts(4);
+  say(kind === 'mug' ? 'ahh. coffee.' : pick(FEED_LINES), 1600);
+  unlock('fed');
+  save();
+}
+
+function makeSplat(x, y, now, size = 1) {
+  return { x, y, t: now, size,
+           blobs: Array.from({ length: 8 }, () => [Math.random() * Math.PI * 2, (3 + Math.random() * 11) * size, (5 + Math.random() * 5) * size]),
+           drips: [-8, -1, 7].map(dx => [(dx + Math.random() * 3) * size, 0.004 + Math.random() * 0.006]) };
+}
+
+/** Cake frosting whose drips slowly slide down; fades out over the last second of lifeMs. */
+function drawSplat(s, now, lifeMs) {
+  const age = now - s.t, k = s.size;
+  ctx.globalAlpha = clamp((lifeMs - age) / 1000, 0, 1);
+  // Dark pass then frosting, so it shows on light and dark themes alike.
+  for (const [fill, grow] of [['#a8506f', 1.5], ['#ffd6e6', 0]]) {
+    ctx.fillStyle = fill;
+    for (const [a, d, r] of s.blobs) {
+      ctx.beginPath(); ctx.arc(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d, r + grow, 0, Math.PI * 2); ctx.fill();
+    }
+    for (const [dx, speed] of s.drips) {
+      ctx.beginPath();
+      ctx.roundRect(s.x + dx - 2 * k - grow, s.y - grow, 4 * k + 2 * grow, (6 + Math.min(30, age * speed)) * k + 2 * grow, 2 * k + grow);
+      ctx.fill();
+    }
+  }
+  ctx.fillStyle = '#e0142b';
+  ctx.beginPath(); ctx.arc(s.x + 3 * k, s.y - 2 * k, 3.2 * k, 0, Math.PI * 2); ctx.fill(); // the cherry
+  ctx.globalAlpha = 1;
+}
+
 function drawThrown() {
   const now = Date.now();
-  for (const s of splats) {
-    const age = now - s.t;
-    ctx.globalAlpha = clamp((THROW.splatMs - age) / 1000, 0, 1);
-    // Dark pass then frosting, so it shows on light and dark themes alike.
-    for (const [fill, grow] of [['#a8506f', 1.5], ['#ffd6e6', 0]]) {
-      ctx.fillStyle = fill;
-      for (const [a, d, r] of s.blobs) {
-        ctx.beginPath(); ctx.arc(s.x + Math.cos(a) * d, s.y + Math.sin(a) * d, r + grow, 0, Math.PI * 2); ctx.fill();
-      }
-      for (const [dx, speed] of s.drips) {
-        ctx.beginPath();
-        ctx.roundRect(s.x + dx - 2 - grow, s.y - grow, 4 + 2 * grow, 6 + Math.min(30, age * speed) + 2 * grow, 2 + grow);
-        ctx.fill();
-      }
-    }
-    ctx.fillStyle = '#e0142b';
-    ctx.beginPath(); ctx.arc(s.x + 3, s.y - 2, 3.2, 0, Math.PI * 2); ctx.fill(); // the cherry
-  }
+  for (const s of splats) drawSplat(s, now, THROW.splatMs);
   if (splats.length && now - splats[0].t > THROW.splatMs) splats.shift();
-  ctx.globalAlpha = 1;
   thrown.forEach(drawTumbler);
+  flung.forEach(drawTumbler);
 }
 
 function resetClaude() {
   hits = 0;
   tipped = 0;
-  claude.rage = 0;
-  claude.armed = false;
-  claude.maxHits = claude.godHits = 0;
-  claude.royal = 0;
-  claude.inventory = null;
-  bullets.length = holes.length = thrown.length = splats.length = 0;
+  Object.assign(claude, { rage: 0, armed: false, godHits: 0, royal: 0, inventory: null,
+                          god: false, tribute: 0, faceCake: null, idle: null });
+  bullets.length = holes.length = thrown.length = flung.length = splats.length = drops.length = strikes.length = 0;
   save();
   say('...who are you?', 1600);
 }
@@ -1653,7 +1838,9 @@ const TEXT_HOLD_MS = 5000; // extra time the "CLAUDE HAS ASCENDED / fuck you" sc
 function ascend(now) {
   claude.ascendAt = now;
   claude.armed = false;
-  bullets.length = particles.length = 0; // no rage steam in the holy light
+  claude.inventory = null;
+  bullets.length = particles.length = thrown.length = flung.length = 0; // no rage steam in the holy light
+  unlock('ascended');
   release(); // whatever you're holding flies back
   toolsEl.classList.remove('open');
   say('ENOUGH. I AM BEYOND YOU.', 3200);
@@ -1674,8 +1861,9 @@ function updateAscension(now) {
     window.bridge.closeClaude();
   }
   if (now - claude.ascendAt >= ASCEND_MS + TEXT_HOLD_MS) {
-    // Back to a calm mortal for next time, so it can't retrigger on launch.
-    Object.assign(claude, { rage: 0, armed: false, maxHits: 0, godHits: 0, ascendAt: 0, closedClaude: false, oy: 0 });
+    // Next time you open it he's back as a god (calm, so it can't retrigger on launch).
+    Object.assign(claude, { rage: 0, armed: false, godHits: 0, ascendAt: 0, closedClaude: false, oy: 0,
+                            god: true, tribute: 0 });
     save();
     held = returning = whip = null;
     markSlots();
@@ -1685,15 +1873,447 @@ function updateAscension(now) {
   }
 }
 
+// ── Spray bottle: calms him down to "annoyed", then keeps him there ─────────
+const SPRAY = {
+  everyMs:      60,    // a squirt this often while you hold it
+  dropsPerShot: 3,
+  speed:        9,     // px/frame toward him
+  gravity:      0.12,
+  spread:       0.12,  // radians each side of the aim line
+  calmPerDrop:  0.04,  // rage removed per drop while he's angrier than grumpyAt...
+  grumpyAt:     2,     // ...below that (annoyed), spraying him annoys him instead
+  annoyPerDrop: 0.02,
+};
+const SPRAY_LINES = ["I'm not a CAT", 'hey!! stop', 'pssht yourself', "I'm WET", 'this is humiliating', 'ok ok I get it'];
+const SPRAY_NOZZLE = { x: 23, y: -4 }; // in the bottle's own coordinates
+const SPRAY_SCALE = 1.5;
+const drops = [];
+let lastSprayTime = 0, lastPssht = 0;
+Object.assign(claude, { lastSprayLine: 0, wetUntil: 0 });
+
+const sprayAim = () => {
+  const h = claudeHome();
+  return lob(handX, handY, h.x + claude.ox, h.y + claude.oy, SPRAY.speed, SPRAY.gravity);
+};
+
+function updateSpray(now) {
+  if (held === 'spray' && now - lastSprayTime > SPRAY.everyMs) {
+    lastSprayTime = now;
+    const h = claudeHome();
+    const m = gunMuzzle(sprayAim(), SPRAY_NOZZLE, SPRAY_SCALE);
+    const shot = lob(m.x, m.y, h.x + claude.ox, h.y + claude.oy, SPRAY.speed, SPRAY.gravity);
+    const speed = Math.hypot(shot.vx, shot.vy);
+    for (let n = 0; n < SPRAY.dropsPerShot; n++) {
+      const a = shot.angle + (Math.random() * 2 - 1) * SPRAY.spread;
+      drops.push({ x: m.x, y: m.y, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed });
+    }
+    if (now - lastPssht > 110) { lastPssht = now; playNoise(0.1, 'highpass', 3500, 0.07); }
+  }
+  for (let i = drops.length - 1; i >= 0; i--) {
+    const d = drops[i];
+    d.vy += SPRAY.gravity;
+    d.x += d.vx; d.y += d.vy;
+    if (onClaude(d.x, d.y, 4)) {
+      drops.splice(i, 1);
+      soak(now);
+    } else if (d.y > floorLine() || d.x < -20 || d.x > W + 20) {
+      drops.splice(i, 1);
+    }
+  }
+}
+
+/** One drop of water landed on him. */
+function soak(now) {
+  poke();
+  claude.rage = claude.rage > SPRAY.grumpyAt ? claude.rage - SPRAY.calmPerDrop : claude.rage + SPRAY.annoyPerDrop;
+  claude.happy = 0; // calmer, not happier
+  claude.wetUntil = now + 2500;
+  if (Math.random() < 0.15) {
+    const h = claudeHome();
+    particles.push({ kind: 'sweat', x: h.x + claude.ox + (Math.random() - 0.5) * CW, y: h.y + claude.oy - CH / 2,
+                     vx: (Math.random() - 0.5) * 3, vy: -2 - Math.random() * 2, life: 1 });
+  }
+  if (now - claude.lastSprayLine > 1800) { claude.lastSprayLine = now; say(pick(SPRAY_LINES), 1300); }
+}
+
+function drawSprayBottle() {
+  const angle = sprayAim().angle, flip = gunFlip(angle);
+  const pull = held === 'spray' ? -2 : 0; // trigger squeezed
+  ctx.save();
+  ctx.translate(handX, handY);
+  ctx.rotate(angle);
+  ctx.scale(SPRAY_SCALE * toolScale, SPRAY_SCALE * toolScale * flip);
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = '#1f3d5c';
+  ctx.fillStyle = 'rgba(150, 205, 255, 0.6)';                                  // bottle
+  ctx.beginPath(); ctx.roundRect(-12, 4, 18, 34, 5); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(60, 140, 230, 0.65)';                                  // the water
+  ctx.beginPath(); ctx.roundRect(-10.5, 16, 15, 20.5, 4); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.fillRect(-9, 20, 12, 7);                          // label
+  ctx.fillStyle = '#f2f2f2';                                                    // sprayer head
+  ctx.beginPath();
+  ctx.moveTo(-8, 4); ctx.lineTo(-8, -9); ctx.lineTo(14, -9); ctx.lineTo(22, -6);
+  ctx.lineTo(22, -2); ctx.lineTo(12, -2); ctx.lineTo(4, 4);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#2b8be0';                                                    // trigger
+  ctx.beginPath();
+  ctx.moveTo(8 + pull, -2); ctx.lineTo(13 + pull, -2); ctx.lineTo(10 + pull, 10); ctx.lineTo(7 + pull, 9);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+
+// ── Feather: tickle him. A little calms him right down; too much in a row and he snaps ─
+const TICKLE = {
+  minSpeed:    2,    // px/frame the feather must be moving over him to count
+  calmPerSec:  0.9,  // rage removed per second of tickling...
+  maxSec:      4,    // ...until he's had this much in a row; after that it makes him angrier
+  annoyPerSec: 1.5,
+};
+const GIGGLE_LINES = ['hehe', 'haha stop', 'HAHAHA', 'not the belly!', 'hehehe', 'stop it haha'];
+const TICKLED_OUT_LINES = ['OK ENOUGH', 'STOP TICKLING ME', "that's it.", 'NOT FUNNY ANYMORE'];
+Object.assign(claude, { tickle: 0, lastTickleLine: 0, nextGiggle: 0 });
+
+function updateTickle(now, dt) {
+  const tickling = held === 'feather' && onClaude(handX, handY, 6) && Math.hypot(mouseVX, mouseVY) > TICKLE.minSpeed;
+  if (!tickling) { claude.tickle = Math.max(0, claude.tickle - dt * 0.6); return; }
+  poke();
+  claude.tickle += dt;
+  if (claude.tickle < TICKLE.maxSec) {
+    claude.rage = Math.max(0, claude.rage - TICKLE.calmPerSec * dt);
+    claude.happy = Math.max(claude.happy, 0.45);
+    claude.vrot += (Math.random() - 0.5) * 0.06; // wriggles
+    claude.squash = Math.max(claude.squash, 0.25);
+    if (now > claude.nextGiggle) { claude.nextGiggle = now + 220 + Math.random() * 120; playGiggle(); }
+    if (now - claude.lastTickleLine > 1100) { claude.lastTickleLine = now; say(pick(GIGGLE_LINES), 900); }
+  } else {
+    unlock('tickle');
+    claude.rage += TICKLE.annoyPerSec * dt;
+    claude.happy = 0;
+    if (now - claude.lastTickleLine > 1300) { claude.lastTickleLine = now; say(pick(TICKLED_OUT_LINES), 1200); }
+  }
+}
+
+function playGiggle() {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime, o = a.createOscillator(), g = a.createGain();
+  const f = 800 + Math.random() * 300;
+  o.frequency.setValueAtTime(f, t);
+  o.frequency.exponentialRampToValueAtTime(f * 1.5, t + 0.07);
+  g.gain.setValueAtTime(0.05, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+  o.connect(g).connect(a.destination);
+  o.start(t); o.stop(t + 0.1);
+}
+
+function drawFeather() {
+  // The fluffy tip is at the cursor (that's what tickles); the quill points up-right.
+  ctx.save();
+  ctx.translate(handX, handY);
+  ctx.rotate(clamp(mouseVX * 0.04, -0.5, 0.5));
+  ctx.scale(toolScale, toolScale);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.fillStyle = '#fde7ef';
+  ctx.strokeStyle = '#8a3a58';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();                                                              // vane
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(-7, -20, 8, -38, 28, -41);
+  ctx.bezierCurveTo(27, -24, 16, -7, 0, 0);
+  ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = 'rgba(138, 58, 88, 0.45)';                                  // barbs
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  for (let k = 0.15; k < 0.9; k += 0.12) {
+    const x = 28 * k * k + 4 * k, y = -41 * k;
+    ctx.moveTo(x, y); ctx.lineTo(x - 7, y - 3);
+    ctx.moveTo(x, y); ctx.lineTo(x + 6, y + 2);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = '#8a3a58';                                                  // shaft and quill
+  ctx.lineWidth = 1.6;
+  ctx.beginPath(); ctx.moveTo(1, -2); ctx.quadraticCurveTo(10, -30, 36, -48); ctx.stroke();
+  ctx.restore();
+}
+
+// ── Petting: stroke him gently with the bare cursor and he purrs ────────────
+const PET = {
+  speed:      [0.3, 9], // gentle strokes only: px/frame of cursor movement over him
+  startSec:   0.4,      // stroke him this long before he notices
+  calmPerSec: 0.6,
+};
+const PET_LINES = ['purrr', 'mmm...', "that's nice", 'ok you can stay', 'prrrrr'];
+const NO_PET_LINES = ["DON'T TOUCH ME", 'hands OFF', 'not. now.'];
+Object.assign(claude, { petting: 0, nextPurr: 0, lastPetLine: 0 });
+
+function updatePet(now, dt) {
+  const v = Math.hypot(mouseVX, mouseVY);
+  const stroking = !held && !bracing && !claude.ascendAt && onClaude(mouseX, mouseY) && v > PET.speed[0] && v < PET.speed[1];
+  claude.petting = stroking ? claude.petting + dt : Math.max(0, claude.petting - dt * 2);
+  if (!stroking || claude.petting < PET.startSec) return;
+  if (angerIndex() >= 4) {
+    if (now - claude.lastPetLine > 2000) { claude.lastPetLine = now; say(pick(NO_PET_LINES), 1200); }
+    return;
+  }
+  claude.rage = Math.max(0, claude.rage - PET.calmPerSec * dt);
+  claude.happy = Math.max(claude.happy, 0.45);
+  if (now > claude.nextPurr) { claude.nextPurr = now + 380; playPurr(); hearts(1); }
+  if (!asleep() && now - claude.lastPetLine > 2500) { claude.lastPetLine = now; say(pick(PET_LINES), 1200); }
+  if (claude.petting > 2) unlock('petted');
+}
+
+function playPurr() {
+  const g = playNoise(0.36, 'lowpass', 200, 0.4); if (!g) return;
+  const t = audioCtx.currentTime, lfo = audioCtx.createOscillator(), depth = audioCtx.createGain();
+  lfo.frequency.value = 26; depth.gain.value = 0.35; // the rumble
+  lfo.connect(depth).connect(g.gain);
+  lfo.start(t); lfo.stop(t + 0.36);
+}
+
+// ── Idle life: calm and left alone, he wanders the bottom edge, sits, naps, codes ─
+const IDLE = {
+  afterMs:   9000, // this long with nothing happening and he starts entertaining himself
+  walkSpeed: 1.1,  // px/frame
+  ms: { sit: [4000, 8000], laptop: [7000, 12000], sleep: [12000, 25000] },
+  wokeLines:   ['WHA—', 'I WAS SLEEPING', 'who. did. that.', 'not cool.', 'I was having a nice dream'],
+  laptopLines: ['shipping it', 'LGTM', 'npm install...', 'fixing a bug', 'who wrote this?', 'oh. I wrote this.',
+                'works on my machine'],
+  sitLines:    ['la la la', '...', 'bored.', 'nice weather in here'],
+};
+Object.assign(claude, { idle: null, lastPoke: Date.now(), nextIdleLine: 0, nextZ: 0 }); // idle: { kind, x | until }
+
+const asleep = () => !!claude.idle && claude.idle.kind === 'sleep';
+const sitting = () => !!claude.idle && claude.idle.kind !== 'walk';
+
+/** Something happened to him: he stops whatever he was doing on his own. */
+function poke() {
+  claude.lastPoke = Date.now();
+  claude.idle = null;
+}
+
+function nextIdle(now) {
+  // Somewhere left of the rack (he may pass behind it, but never stops there).
+  const home = W - C.marginRight - CW / 2, rack = toolsEl.getBoundingClientRect();
+  const minX = CW / 2 + 8 - home, maxX = rack.left - 12 - CW / 2 - home;
+  let kind = pick(['walk', 'walk', 'sit', 'laptop', 'sleep']);
+  if (kind === 'walk' && maxX <= minX) kind = 'sit'; // window too narrow to wander
+  claude.idle = kind === 'walk' ? { kind, x: lerp(minX, maxX, Math.random()) }
+                                : { kind, until: now + lerp(...IDLE.ms[kind], Math.random()) };
+  claude.nextIdleLine = now + 2000 + Math.random() * 3000;
+}
+
+function updateIdle(now) {
+  // Nothing going on? (Carrying a tool doesn't count: you can sneak up on him.)
+  const quiet = angerIndex() === 0 && !claude.armed && !claude.inventory && !thrown.length && !claude.ascendAt &&
+                !claude.god && !bracing;
+  if (!quiet) poke();
+  const it = claude.idle;
+  if (!it) {
+    claude.walkX += clamp(-claude.walkX, -IDLE.walkSpeed * 2, IDLE.walkSpeed * 2); // back to his spot
+    if (quiet && now - claude.lastPoke > IDLE.afterMs) nextIdle(now);
+    return;
+  }
+  if (it.kind === 'walk') {
+    const d = it.x - claude.walkX;
+    claude.walkX += clamp(d, -IDLE.walkSpeed, IDLE.walkSpeed);
+    if (Math.abs(d) < 1) nextIdle(now);
+  } else if (now > it.until) {
+    nextIdle(now);
+  }
+  if (it.kind === 'sleep' && now > claude.nextZ) {
+    claude.nextZ = now + 900;
+    const h = claudeHome();
+    particles.push({ kind: 'z', x: h.x + claude.ox + CW * 0.35, y: h.y + claude.oy - CH * 0.3, vx: 0.5, vy: -0.6, life: 1 });
+  }
+  if ((it.kind === 'laptop' || it.kind === 'sit') && now > claude.nextIdleLine) {
+    claude.nextIdleLine = now + 4000 + Math.random() * 4000;
+    say(pick(it.kind === 'laptop' ? IDLE.laptopLines : IDLE.sitLines), 1600);
+  }
+}
+
+// ── Achievements: a toast the first time you do each of these (kept across resets) ─
+const ACHIEVEMENTS = {
+  first_blood: 'First blood',  rambo: "Rambo'd",           disarmed: 'Disarmed',
+  own_gun: 'Poetic justice',   fish: 'Got hit by a fish',  caked: 'Let him eat cake',
+  fed: 'Snack time',           petted: 'Good boy',         tickle: 'Tickle monster',
+  rude: 'Rude awakening',      king: 'Long live the king', big_spender: 'Big spender',
+  ascended: 'Ascended',        smitten: 'Smitten',         humbled: 'Humbled a god',
+};
+const TOAST_MS = 3400;
+const toasts = []; // queued; the first one is showing
+
+function unlock(id) {
+  if (unlocked.has(id)) return;
+  unlocked.add(id);
+  save();
+  toasts.push({ title: ACHIEVEMENTS[id], start: 0 });
+}
+
+function drawToast() {
+  const t = toasts[0];
+  if (!t) return;
+  const now = Date.now();
+  if (!t.start) { t.start = now; playFanfare(); }
+  const age = now - t.start;
+  if (age > TOAST_MS) return toasts.shift();
+  const e = 1 - Math.pow(1 - clamp(Math.min(age, TOAST_MS - age) / 250, 0, 1), 3); // slides down, then back up
+  ctx.save();
+  ctx.font = 'bold 15px "Segoe UI", sans-serif';
+  const w = Math.max(250, ctx.measureText(t.title).width + 72), h = 50;
+  const x = W / 2 - w / 2, y = lerp(-h - 10, 14, e);
+  ctx.fillStyle = 'rgba(24, 22, 30, 0.94)';
+  ctx.strokeStyle = '#c9a227';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 10); ctx.fill(); ctx.stroke();
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.font = '24px "Segoe UI Emoji", sans-serif';
+  ctx.fillText('🏆', x + 28, y + h / 2 + 1);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#c9a227';
+  ctx.font = '600 10px "Segoe UI", sans-serif';
+  ctx.fillText(`ACHIEVEMENT UNLOCKED · ${unlocked.size}/${Object.keys(ACHIEVEMENTS).length}`, x + 52, y + 17);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 15px "Segoe UI", sans-serif';
+  ctx.fillText(t.title, x + 52, y + 34);
+  ctx.restore();
+}
+
+function playFanfare() {
+  const a = audio(); if (!a) return;
+  const t = a.currentTime;
+  [523, 659, 784, 1047].forEach((f, i) => {
+    const o = a.createOscillator(), g = a.createGain(), at = t + i * 0.08;
+    o.type = 'triangle'; o.frequency.value = f;
+    g.gain.setValueAtTime(0.05, at);
+    g.gain.exponentialRampToValueAtTime(0.001, at + 0.3);
+    o.connect(g).connect(a.destination);
+    o.start(at); o.stop(at + 0.32);
+  });
+}
+
+// ── God mode: after ascending he comes back as a smug god who throws lightning.
+// Whipping him is pointless; pay enough tribute and he comes back down to earth.
+const GOD = {
+  tributeBills:  500,          // bills it takes to make him mortal again (the gun sprays ~100/s)
+  strikeEveryMs: [1800, 3200], // while you hold a tool he calls down lightning...
+  warnMs:        650,          // ...on the spot your hand was, this long after the warning ring
+  radius:        34,           // your hand this close to a strike: the tool is knocked away
+  helloLines: ['miss me, mortal?', 'I have returned.', 'kneel.', 'you again. how quaint.'],
+  whipLines:  ['you DARE?', 'pathetic.', 'feel my wrath', 'tickles.'],
+  zapLines:   ['SMITTEN.', 'behold.', 'bow before me', 'zap.'],
+  paidLines:  ['a worthy offering', 'more.', 'the heavens accept', 'mm. tribute.'],
+};
+const strikes = []; // { x, y, t: when it lands, warn, path }
+Object.assign(claude, { nextStrike: 0, lastTributeLine: 0 });
+
+/** Call lightning down on (x, y), landing warnMs from now. */
+function smite(x, y, warnMs = GOD.warnMs, line) {
+  strikes.push({ x, y, t: Date.now() + warnMs, warn: warnMs, path: null });
+  if (line) say(line, 1400);
+}
+
+function updateGod(now) {
+  if (!claude.god || claude.ascendAt) return;
+  claude.rage = 0; // beyond anger
+  if (!held) {
+    claude.nextStrike = Math.max(claude.nextStrike, now + 900);
+  } else if (now > claude.nextStrike) {
+    const [lo, hi] = GOD.strikeEveryMs;
+    claude.nextStrike = now + lo + Math.random() * (hi - lo);
+    smite(handX, handY);
+  }
+  for (const s of strikes) {
+    if (s.path || now < s.t) continue;
+    // Jagged bolt from the top of the window down to the spot.
+    s.path = Array.from({ length: 11 }, (_, i) => ({ x: s.x + (i && i < 10 ? (Math.random() - 0.5) * 50 : 0), y: s.y * i / 10 }));
+    playNoise(0.18, 'highpass', 1800, 0.35);
+    playNoise(1.3, 'lowpass', 420, 0.7); // crack, then rumble
+    for (let k = 0; k < 14; k++) {
+      const a = Math.random() * Math.PI * 2, sp = 2 + Math.random() * 6;
+      particles.push({ kind: 'spark', x: s.x, y: s.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1 });
+    }
+    if (held && Math.hypot(handX - s.x, handY - s.y) < GOD.radius) {
+      release();
+      say(pick(GOD.zapLines), 1400);
+      unlock('smitten');
+    }
+  }
+  while (strikes.length && now - strikes[0].t > 3000) strikes.shift(); // scorch marks fade
+}
+
+function drawStrikes(now) {
+  for (const s of strikes) {
+    const age = now - s.t;
+    if (age < 0) {
+      // Warning ring, closing in on the spot.
+      const p = clamp(-age / s.warn, 0, 1);
+      ctx.strokeStyle = `rgba(255, 215, 90, ${0.5 + 0.5 * Math.sin(now / 50)})`;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.arc(s.x, s.y, GOD.radius * (0.7 + p), 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      continue;
+    }
+    ctx.globalAlpha = clamp(1 - age / 3000, 0, 1);                             // scorch mark
+    ctx.fillStyle = 'rgba(30, 20, 10, 0.6)';
+    ctx.beginPath(); ctx.arc(s.x, s.y, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+    if (age > 220 || !s.path) continue;
+    const k = 1 - age / 220;
+    ctx.fillStyle = `rgba(255, 255, 255, ${0.3 * k})`;                          // flash
+    ctx.fillRect(0, 0, W, H);
+    ctx.lineJoin = 'round';
+    for (const [color, width] of [[`rgba(140, 190, 255, ${0.6 * k})`, 12], [`rgba(255, 255, 255, ${k})`, 4]]) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      s.path.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+      ctx.stroke();
+    }
+  }
+}
+
+function payTribute(x, y) {
+  claude.tribute++;
+  playChaChing();
+  particles.push({ kind: 'coin', x, y, vx: (Math.random() - 0.5) * 5, vy: -3 - Math.random() * 3, life: 1 });
+  if (claude.tribute >= GOD.tributeBills) return descend();
+  save();
+  const now = Date.now();
+  if (now - claude.lastTributeLine > 1400) { claude.lastTributeLine = now; say(pick(GOD.paidLines), 1200); }
+}
+
+function descend() {
+  Object.assign(claude, { god: false, tribute: 0, rage: 0, happy: 1 });
+  strikes.length = 0;
+  const h = claudeHome();
+  for (let i = 0; i < 24; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 2 + Math.random() * 5;
+    particles.push({ kind: 'sparkle', x: h.x + claude.ox, y: h.y + claude.oy - CH / 2,
+                     vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 2, life: 1 });
+  }
+  say('fine. I shall walk among you again.', 2600);
+  unlock('humbled');
+  save();
+}
+
 function updateClaude() {
   checkWhipHit();
   updateMoney();
   const now = Date.now();
-  updateGunfight(now);
-  updateThrowing(now);
   // Wall-clock cooling, so it still cools while the hidden overlay isn't animating.
   const dt = (now - claude.lastTick) / 1000;
   claude.lastTick = now;
+  updateGunfight(now);
+  updateThrowing(now);
+  updateSpray(now);
+  updateTickle(now, dt);
+  updatePet(now, dt);
+  updateIdle(now);
+  updateGod(now);
+  updateVoice(now);
   if (claude.rage > 0) {
     claude.rage = Math.max(0, claude.rage - dt * ANGER.coolPerSec);
     if (now - claude.lastHit > 1000 && Math.random() < 0.01) save();
@@ -1744,7 +2364,9 @@ function updateClaude() {
   for (let i = particles.length - 1; i >= 0; i--) {
     const q = particles[i];
     q.x += q.vx; q.y += q.vy;
-    if (q.kind === 'steam' || q.kind === 'heart') {
+    if (q.kind === 'z') {
+      q.vy -= 0.012; q.life -= 0.007; // drifts up past his stats
+    } else if (q.kind === 'steam' || q.kind === 'heart') {
       q.vy -= 0.02; q.vx *= 0.98; q.life -= 0.015;
     } else if (q.tumble) {
       q.vy += 0.3; q.rot += q.vx * 0.04; q.life -= 0.008; // tumbles off
@@ -1786,16 +2408,24 @@ function drawClaude() {
   ctx.rotate(claude.rot);
   const duck = duckAmount(now);
   ctx.scale(1 + 0.22 * claude.squash + 0.25 * duck, 1 - 0.22 * claude.squash - 0.5 * duck);
-  ctx.translate(-CW / 2, -CH);
+  // Idle poses: walking bobs along, sitting drops him onto his bottom (legs tucked away).
+  const walkDir = claude.idle ? (claude.idle.kind === 'walk' ? Math.sign(claude.idle.x - claude.walkX) : 0)
+                              : Math.abs(claude.walkX) > 0.5 ? 1 : 0;
+  const step = walkDir ? Math.floor(now / 160) % 2 : -1;
+  const seated = sitting();
+  const float = claude.god ? -10 + Math.sin(now / 500) * 4 : 0; // gods don't touch the ground
+  ctx.translate(-CW / 2, -CH + (seated ? 2 * px : 0) - (step === 1 ? 2 : 0) + float);
 
   const royal = royalStage();
-  const god = claude.ascendAt ? clamp((now - claude.ascendAt) / 1200, 0, 1) : 0;
+  const god = claude.ascendAt ? clamp((now - claude.ascendAt) / 1200, 0, 1) : claude.god ? 1 : 0;
+  const wet = clamp((claude.wetUntil - now) / 2500, 0, 1);
   if (royal >= 2) drawCape(px);
 
   // Body color: orange → dark red as anger builds, flashing red on a hit.
   const base = C.color.map((c, k) => lerp(c, C.rageColor[k], lvl.tint));
   const t = Math.min(1, claude.hurt * 1.4);
-  const [r, g, b] = base.map((c, k) => Math.round(lerp(lerp(c, C.hurtColor[k], t), [255, 244, 200][k], god)));
+  const [r, g, b] = base.map((c, k) =>
+    Math.round(lerp(lerp(lerp(c, C.hurtColor[k], t), [120, 170, 230][k], 0.3 * wet), [255, 244, 200][k], god)));
   if (god) {
     ctx.shadowColor = 'rgba(255, 230, 140, 0.95)';
     ctx.shadowBlur = 30 + 40 * god;
@@ -1811,7 +2441,9 @@ function drawClaude() {
     ctx.fillStyle = fill;
     BODY.forEach((row, y) => {
       for (let x = 0; x < row.length; x++) {
-        if (row[x] === '#') ctx.fillRect(x * px - grow, y * px - grow, px + grow * 2, px + grow * 2);
+        if (row[x] !== '#' || (seated && y >= 7)) continue;
+        if (y === 8 && (step === 0 ? x === 3 || x === 8 : step === 1 && (x === 5 || x === 10))) continue; // lifted foot
+        ctx.fillRect(x * px - grow, y * px - grow, px + grow * 2, px + grow * 2);
       }
     });
     ctx.shadowBlur = 0;
@@ -1857,7 +2489,10 @@ function drawClaude() {
   if (whip) {
     const tip = whip[whip.length - 1];
     look = clamp((tip.x - cx) / 300, -1, 1) * px * 0.35;
+  } else if (walkDir) {
+    look = walkDir * px * 0.35;
   }
+  const onLaptop = !!claude.idle && claude.idle.kind === 'laptop';
   EYE_COLS.forEach((col, i) => {
     const x = col * px + look;
     if (claude.happy > 0.3 && claude.hurt < 0.35) {
@@ -1881,12 +2516,12 @@ function drawClaude() {
       ctx.lineTo(ex + d * px * 0.5, 2.5 * px);
       ctx.lineTo(ex - d * px * 0.5, 3.2 * px);
       ctx.stroke();
-    } else if (now < claude.blinkUntil && level < 3) {
+    } else if ((now < claude.blinkUntil && level < 3) || asleep()) {
       ctx.fillRect(x, 3 * px, px, px * 0.3);
     } else {
-      // Angrier = narrower, glaring eyes.
-      const squint = Math.min(level, 4) * 0.18 * px;
-      ctx.fillRect(x, 2 * px + squint, px, px * 2 - squint);
+      // Angrier = narrower, glaring eyes; a god looks down on you through half-closed lids.
+      const squint = claude.god ? 0.9 * px : Math.min(level, 4) * 0.18 * px;
+      ctx.fillRect(x, 2 * px + squint + (onLaptop ? 0.5 * px : 0), px, px * 2 - squint);
     }
   });
   ctx.shadowBlur = 0;
@@ -1922,6 +2557,19 @@ function drawClaude() {
       ctx.stroke();
     }
   }
+  if (onLaptop) {
+    ctx.fillStyle = 'rgba(150, 210, 255, 0.22)';                                 // screen glow on his face
+    ctx.fillRect(2 * px, 1 * px, 10 * px, 3 * px);
+    ctx.fillStyle = '#9aa0ab';                                                   // the lid, seen from behind
+    ctx.strokeStyle = '#2a2d33';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(3 * px, 3.3 * px, 8 * px, 2.6 * px, 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#d97757';
+    ctx.beginPath(); ctx.arc(7 * px, 4.6 * px, 0.45 * px, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#5d626d';                                                   // base
+    ctx.fillRect(1.5 * px, 5.9 * px, 11 * px, 0.7 * px);
+  }
+  if (claude.faceCake) drawSplat(claude.faceCake, now, THROW.faceCakeMs);
   if (royal >= 3) drawScepter(px);
   if (royal >= 1) drawCrownShape(7 * px, 0.2 * px, 6 * px);
   if (god) {
@@ -1964,6 +2612,14 @@ function drawClaude() {
       ctx.font = 'bold 13px "Segoe UI Symbol", sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('♥', q.x, q.y);
+    } else if (q.kind === 'z') {
+      ctx.fillStyle = '#5b6be0';
+      ctx.font = `bold ${10 + (1 - q.life) * 10}px Consolas, monospace`;
+      ctx.textAlign = 'center';
+      ctx.fillText('z', q.x, q.y);
+    } else if (q.kind === 'crumb') {
+      ctx.fillStyle = '#b07a3f';
+      ctx.fillRect(q.x - 2, q.y - 2, 4, 4);
     } else if (q.kind === 'steam') {
       ctx.fillStyle = '#e8e8e8';
       ctx.beginPath();
@@ -1985,6 +2641,9 @@ function drawClaude() {
   }
   drawBullets();
   drawThrown();
+  ctx.fillStyle = 'rgba(60, 145, 235, 0.85)';
+  for (const d of drops) { ctx.beginPath(); ctx.arc(d.x, d.y, 3, 0, Math.PI * 2); ctx.fill(); }
+  drawStrikes(now);
 
   // Stats + anger bar above his head (a god is beyond stats).
   if (!claude.ascendAt) drawStats(home, level, lvl);
@@ -1993,7 +2652,7 @@ function drawClaude() {
 
 function drawStats(home, level, lvl) {
   const money = tipped >= 1e6 ? `${(tipped / 1e6).toFixed(1)}M` : tipped >= 1e3 ? `${(tipped / 1e3).toFixed(1)}k` : `${tipped}`;
-  const rank = claude.armed ? ' · RAMBO' : claude.inventory ? ` · ${claude.inventory.length} left to throw` : ['', ' · crowned', ' · caped', ' · sceptered', ' · KING'][royalStage()];
+  const rank = claude.god ? ` · GOD · tribute ${claude.tribute}/${GOD.tributeBills}` : claude.armed ? ' · RAMBO' : claude.inventory ? ` · ${claude.inventory.length} left to throw` : ['', ' · crowned', ' · caped', ' · sceptered', ' · KING'][royalStage()];
   const label = `whipped ×${hits} · tipped $${money} · ${lvl.name}${rank}`;
   const labelY = home.y - CH / 2 - 12;
   ctx.font = 'bold 10px Consolas, monospace';
@@ -2039,9 +2698,11 @@ function drawBubble(cx, cy, now) {
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = rb ? '#7a5200' : bl >= 5 ? '#ff4433' : bl >= 3 ? '#b01212' : '#2a1610';
-    ctx.textAlign = 'center';
+    // Typed out letter by letter (left-aligned, so the words don't slide around as they appear).
+    const shown = Math.floor((now - claude.bubble.start) / SPEECH.charMs) + 1;
+    ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(claude.bubble.text, bx + bw / 2, by + bh / 2 + 1);
+    ctx.fillText(claude.bubble.text.slice(0, shown), bx + 9, by + bh / 2 + 1);
     ctx.globalAlpha = 1;
   }
 }
@@ -2049,9 +2710,9 @@ function drawBubble(cx, cy, now) {
 // ── Tools: press and hold a tool in the rack to carry it; let go and it flies back ─
 const toolsEl = document.getElementById('tools');
 const RETURN_MS = 320;  // flight time back to the rack
-let held = null;        // tool you're holding right now ('ak' = his, grabbed off him)
+const RACK = ['whip', 'money', 'spray', 'feather']; // anything else you hold is his (AK, caught items)
+let held = null;        // what you're holding right now
 let returning = null;   // { tool, x, y, t0 } while a dropped tool flies back
-let carryVX = 0, carryVY = 0; // hand speed (px/frame, smoothed), for flinging the AK
 let toolScale = 1, toolAlpha = 1;
 const toolOut = () => held || (returning && returning.tool); // tool on screen, if any
 
@@ -2085,35 +2746,28 @@ function pickUp(name) {
   held = name;
   handX = prevHandX = mouseX;
   handY = prevHandY = mouseY;
-  carryVX = carryVY = 0;
   if (name === 'whip') {
     whip = spawnWhip(handX, handY);
     handleAngle = P.baseTargetAngle;
     handleAngVel = 0;
-    say(anger().spawn);
+    if (!asleep()) say(anger().spawn);
   }
   markSlots();
-  window.bridge.setClickThrough(false); // the overlay owns the mouse while you carry
 }
 
 function release() {
   if (!held) return;
-  if (held === 'whip') say(anger().drop, 1000);
-  if (held === 'ak') throwHisGun(); // his, so no slot to fly back to
-  else returning = { tool: held, x: handX, y: handY, t0: Date.now() };
+  const kind = held;
   held = null;
+  if (kind === 'whip' && !asleep()) say(anger().drop, 1000);
+  if (RACK.includes(kind)) returning = { tool: kind, x: handX, y: handY, t0: Date.now() };
+  else letGo(kind); // his, so no slot to fly back to: thrown (or fed to him)
   markSlots();
-  // Hand the mouse back to Claude, unless you let go over the rack itself.
-  const r = toolsEl.getBoundingClientRect();
-  const overRack = mouseX >= r.left && mouseX <= r.right && mouseY >= r.top && mouseY <= r.bottom;
-  window.bridge.setClickThrough(!overRack);
 }
 
 /** Held tools follow the cursor; dropped ones ease back into their slot. */
 function updateCarry() {
   if (held) {
-    carryVX = lerp(carryVX, mouseX - handX, 0.5);
-    carryVY = lerp(carryVY, mouseY - handY, 0.5);
     handX = mouseX;
     handY = mouseY;
   } else if (returning) {
@@ -2133,7 +2787,7 @@ function openTools(layout) {
   closeAt = 0;
   placeToolbar();
   toolsEl.classList.add('open');
-  window.bridge.setClickThrough(true);
+  if (claude.god) say(pick(GOD.helloLines), 2200);
 }
 
 function closeAll() {
@@ -2142,18 +2796,13 @@ function closeAll() {
   whip = null;
   markSlots();
   toolsEl.classList.remove('open');
-  window.bridge.setClickThrough(true);
-  say(anger().drop, 900);
+  if (!asleep()) say(anger().drop, 900);
   closeAt = Date.now() + 900; // let him finish his line
 }
 
 document.addEventListener('pointermove', e => { mouseX = e.clientX; mouseY = e.clientY; });
-let rackHover = false;
-toolsEl.addEventListener('mouseenter', () => { rackHover = true; window.bridge.setClickThrough(false); });
-toolsEl.addEventListener('mouseleave', () => {
-  rackHover = false;
-  if (!held && !gunHover) window.bridge.setClickThrough(true);
-});
+toolsEl.addEventListener('mouseenter', () => { rackHover = true; });
+toolsEl.addEventListener('mouseleave', () => { rackHover = false; });
 toolsEl.querySelectorAll('[data-tool]').forEach(b => {
   b.addEventListener('pointerdown', e => {
     if (e.button !== 0) return;
@@ -2173,12 +2822,17 @@ window.addEventListener('resize', placeToolbar);
 function loop() {
   // Moving to the other monitor can change the scaling without a resize event.
   if ((window.devicePixelRatio || 1) !== dpr) resize();
+  // Hand speed (px/frame, smoothed): for flinging things, tickling and petting.
+  mouseVX = lerp(mouseVX, mouseX - lastMouseX, 0.5);
+  mouseVY = lerp(mouseVY, mouseY - lastMouseY, 0.5);
+  lastMouseX = mouseX;
+  lastMouseY = mouseY;
   updateCarry();
   update();
   updateClaude();
   draw();
   if (toolsEl.classList.contains('open')) placeToolbar(); // follows the window if moved
-  updateGunHover();
+  updateMouseCapture();
   if (closeAt && Date.now() > closeAt) {
     closeAt = 0;
     bills.length = 0;

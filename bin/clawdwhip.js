@@ -17,7 +17,8 @@ if (!electronBinary) {
 
 const appPath = path.resolve(__dirname, '..');
 
-const child = spawn(electronBinary, [appPath], {
+// --reset: every `clawdwhip` from the terminal starts him fresh (no lingering godhood).
+const child = spawn(electronBinary, [appPath, '--reset'], {
   detached: true,
   stdio: 'ignore',
   windowsHide: true,

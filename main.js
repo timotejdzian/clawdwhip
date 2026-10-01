@@ -73,7 +73,11 @@ ipcMain.on('set-click-through', (_e, on) => overlay.setIgnoreMouseEvents(!!on, {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => { if (!overlay.isVisible()) toggleOverlay(); });
+  const reset = () => overlay.webContents.send('reset-claude');
+  app.on('second-instance', (_e, argv) => {
+    if (argv.includes('--reset')) reset(); // `clawdwhip` run again while it's already up
+    if (!overlay.isVisible()) toggleOverlay();
+  });
   app.on('window-all-closed', e => e.preventDefault()); // keep alive in the tray
 
   app.whenReady().then(() => {
@@ -89,12 +93,15 @@ if (!app.requestSingleInstanceLock()) {
     });
     overlay.setAlwaysOnTop(true, 'screen-saver');
     overlay.loadFile('overlay.html');
-    overlay.webContents.once('did-finish-load', toggleOverlay); // open once on launch
+    overlay.webContents.once('did-finish-load', () => { // open once on launch
+      if (process.argv.includes('--reset')) reset();
+      toggleOverlay();
+    });
 
     tray = new Tray(path.join(__dirname, 'icon', 'claude.ico'));
     tray.setToolTip('clawdwhip - click to whip Claude');
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Reset Claude (whips, anger, gun, crown)', click: () => overlay.webContents.send('reset-claude') },
+      { label: 'Reset Claude (whips, anger, gun, crown, godhood)', click: reset },
       { type: 'separator' },
       { label: 'Quit', click: () => app.quit() },
     ]));
